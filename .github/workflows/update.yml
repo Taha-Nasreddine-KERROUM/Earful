@@ -86,13 +86,18 @@ jobs:
 
       - name: Set up Android SDK
         if: github.event_name != 'schedule' || steps.reader.outputs.changed == 'true'
-        uses: android-actions/setup-android@v3
+        run: |
+          # GitHub's machines already have the Android SDK; just point the build at it and
+          # accept the licenses. The build downloads the exact Android version it needs.
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          echo "Android SDK: $SDK"
+          echo "sdk.dir=$SDK" > "$PROJECT_DIR/local.properties"
+          yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
 
       - name: Build signed APK
         if: github.event_name != 'schedule' || steps.reader.outputs.changed == 'true'
         run: |
           cd "$PROJECT_DIR"
-          sdkmanager "platforms;android-37.2" > /dev/null
           VC=$((100 + GITHUB_RUN_NUMBER))
           echo "VC=$VC" >> "$GITHUB_ENV"
           chmod +x gradlew
