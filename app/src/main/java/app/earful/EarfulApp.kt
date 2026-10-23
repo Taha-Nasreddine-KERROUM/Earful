@@ -5,6 +5,7 @@ import app.earful.data.Library
 import app.earful.data.Network
 import app.earful.data.YouTube
 import app.earful.playback.AudioCache
+import app.earful.playback.Session
 import app.earful.update.Updater
 import coil3.ImageLoader
 import coil3.PlatformContext
@@ -19,7 +20,9 @@ class EarfulApp : Application(), SingletonImageLoader.Factory {
         super.onCreate()
         YouTube.init()
         Library.init(this)
-        AudioCache.init(this) // also deletes any audio left over from a previous run
+        Session.init(this)
+        // Keeps the audio of a video you left open; deletes anything else left over.
+        AudioCache.init(this, keep = Session.keepIds())
         Updater.cleanUp(this)
         Updater.check(this)
         // A video failing in a way that smells like "YouTube changed": look for a fix right now.

@@ -20,8 +20,8 @@ configure<ApplicationExtension> {
         minSdk = 24
         targetSdk = 36
         // Automatic builds pass -Pvc=<number> so every update has a higher version code.
-        versionCode = (findProperty("vc") as String?)?.toInt() ?: 12
-        versionName = (findProperty("vn") as String?) ?: "2.1"
+        versionCode = (findProperty("vc") as String?)?.toInt() ?: 13
+        versionName = (findProperty("vn") as String?) ?: "2.2"
         // Where the app looks for updates (owner/repo on GitHub). Filled in by the automatic
         // build; empty in a plain local build, which simply turns the updater off.
         buildConfigField("String", "UPDATE_REPO", "\"${System.getenv("GITHUB_REPOSITORY") ?: (findProperty("updateRepo") as String? ?: "")}\"")

@@ -44,6 +44,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 
 /** Out-of-band signals the UI can't get from the player itself. */
 object PlaybackEvents {
@@ -109,10 +110,20 @@ class PlaybackService : MediaSessionService() {
         // The queue is the player's playlist. Whenever the current or next track changes we
         // keep exactly those two on the phone and delete the audio of anything before.
         exo.addListener(object : Player.Listener {
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) { updateWindow(); recordListen() }
-            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = updateWindow()
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) { updateWindow(); recordListen(); saveSession() }
+            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) { updateWindow(); saveSession() }
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) = skipIfUnplayable()
+            override fun onIsPlayingChanged(isPlaying: Boolean) = saveSession()
+            override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) = saveSession()
         })
+        // While playing, note the position every few seconds (a tiny file write), so even if
+        // Android kills the app you come back within a few seconds of where you were.
+        scope.launch {
+            while (true) {
+                delay(5_000)
+                if (exoRef?.isPlaying == true) saveSession()
+            }
+        }
         AudioCache.onResolved = ::onResolved
 
         val back10 = CommandButton.Builder(CommandButton.ICON_SKIP_BACK_10)
@@ -142,15 +153,43 @@ class PlaybackService : MediaSessionService() {
             .build()
 
         setShowNotificationForIdlePlayer(SHOW_NOTIFICATION_FOR_IDLE_PLAYER_NEVER)
+
+        // Left a video open last time? Bring back the queue and the exact spot, paused.
+        Session.load()?.let { saved ->
+            exo.setMediaItems(saved.items.map(::itemFor), saved.index, saved.positionMs)
+            exo.prepare()
+        }
+    }
+
+    private fun itemFor(v: Video): MediaItem = MediaItem.Builder()
+        .setMediaId(v.id)
+        .setUri(CachedAudioDataSource.uriFor(v.id))
+        .setMediaMetadata(metadataFor(v))
+        .build()
+
+    /** Queue + current video + position → session.json. An empty player means "closed": forget it. */
+    private fun saveSession() {
+        val p = exoRef ?: return
+        if (p.mediaItemCount == 0) { Session.clear(); return }
+        val items = (0 until p.mediaItemCount).map { i ->
+            val item = p.getMediaItemAt(i)
+            item.mediaMetadata.extras?.let { videoFromExtras(item.mediaId, it) }
+                ?: Video(item.mediaId, item.mediaMetadata.title?.toString().orEmpty(),
+                    item.mediaMetadata.artist?.toString().orEmpty(), Video.fallbackThumb(item.mediaId), 0)
+        }
+        Session.save(items, p.currentMediaItemIndex, p.currentPosition)
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo) = session
 
     override fun onDestroy() {
+        saveSession()
         scope.cancel()
         session?.run { player.release(); release() }
         session = null
-        AudioCache.releaseAll()
+        exoRef = null
+        // A video still open → keep its audio for next time. Closed → delete everything.
+        if (Session.load() != null) AudioCache.suspendAll() else AudioCache.releaseAll()
         super.onDestroy()
     }
 
@@ -165,6 +204,19 @@ class PlaybackService : MediaSessionService() {
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                 .setAvailablePlayerCommands(commands)
                 .build()
+        }
+
+        /** "Resume" from headphones / the system media controls after a restart. */
+        override fun onPlaybackResumption(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            isForPlayback: Boolean,
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            val saved = Session.load()
+                ?: return Futures.immediateFailedFuture(UnsupportedOperationException("nothing to resume"))
+            return Futures.immediateFuture(
+                MediaSession.MediaItemsWithStartPosition(saved.items.map(::itemFor), saved.index, saved.positionMs)
+            )
         }
 
         /**

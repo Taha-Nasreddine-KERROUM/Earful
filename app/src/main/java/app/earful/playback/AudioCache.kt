@@ -63,6 +63,8 @@ class AudioFile(val videoId: String, val file: File) {
     }
 
     internal fun advance(by: Long) = synchronized(lock) { written += by; lock.notifyAll() }
+    /** Picks up a file kept from an earlier run, or throws its bytes away (n = 0). */
+    internal fun restore(n: Long) = synchronized(lock) { written = n; lock.notifyAll() }
     internal fun finish() = synchronized(lock) {
         if (totalLength <= 0) totalLength = written
         complete = true; lock.notifyAll()
@@ -100,11 +102,22 @@ object AudioCache {
     /** Called on the main thread once a track's details (title, stream, suggestions) are known. */
     @Volatile var onResolved: ((ResolvedAudio) -> Unit)? = null
 
-    fun init(context: Context) {
+    /**
+     * [keep]: tracks of an unfinished session (the app was closed with a video still open).
+     * Their audio stays so you resume instantly, even offline; anything else is leftover: binned.
+     */
+    fun init(context: Context, keep: Set<String>) {
         dir = File(context.cacheDir, "audio")
-        // A fresh process never has anything playing: whatever is here is leftover. Bin it.
-        dir.deleteRecursively()
         dir.mkdirs()
+        dir.listFiles()?.forEach { f ->
+            if (f.name.substringBeforeLast('.') !in keep) f.delete()
+        }
+    }
+
+    private fun metaFile(id: String) = File(dir, "$id.meta")
+
+    private fun writeMeta(f: AudioFile, done: Boolean) = runCatching {
+        metaFile(f.videoId).writeText("""{"len":${f.totalLength},"done":$done}""")
     }
 
     @Synchronized
@@ -123,7 +136,23 @@ object AudioCache {
         val f = AudioFile(videoId, File(dir, "$videoId.audio"))
         files[videoId] = f
         failures.remove(videoId)
-        _progress.update { it + (videoId to 0f) }
+        // Kept from last time? Use what's there: a finished file needs no network at all.
+        val meta = metaFile(videoId)
+        if (f.file.exists() && meta.exists()) {
+            val m = runCatching { org.json.JSONObject(meta.readText()) }.getOrNull()
+            val len = m?.optLong("len", -1) ?: -1
+            val have = f.file.length()
+            if (len > 0 && have in 1..len) {
+                f.totalLength = len
+                f.restore(have)
+                if (m?.optBoolean("done") == true && have == len) {
+                    f.finish()
+                    _progress.update { it + (videoId to 1f) }
+                    return f
+                }
+            } else { f.file.delete(); meta.delete() }
+        }
+        _progress.update { it + (videoId to if (f.totalLength > 0) f.written.toFloat() / f.totalLength else 0f) }
         jobs[videoId] = scope.launch {
             after?.done?.await()
             fetch(f)
@@ -158,20 +187,36 @@ object AudioCache {
         failures.clear()
         _progress.value = emptyMap()
         dir.listFiles()?.forEach { it.delete() }
+        Session.clear()
     }
 
     private fun drop(f: AudioFile) {
         jobs.remove(f.videoId)?.cancel()
         f.drop()
         f.file.delete()
+        metaFile(f.videoId).delete()
         _progress.update { it - f.videoId }
+    }
+
+    /** App going away with a video still open: stop downloading but keep every byte. */
+    @Synchronized
+    fun suspendAll() {
+        jobs.values.forEach { it.cancel() }
+        jobs.clear()
+        files.values.forEach { it.drop() }
+        files.clear()
     }
 
     // ---- per-track work ----------------------------------------------------------------------
 
     private suspend fun CoroutineScope.fetch(f: AudioFile) {
         val audio = resolve(f) ?: return
+        // Resuming a kept file only works if YouTube still serves byte-for-byte the same one.
+        if (f.written > 0 && (audio.contentLength <= 0 || audio.contentLength != f.totalLength)) {
+            f.restore(0); f.file.delete()
+        }
         f.totalLength = audio.contentLength
+        writeMeta(f, done = false)
         withContext(Dispatchers.Main) { onResolved?.invoke(audio) }
         download(f, audio.streamUrl) { YouTube.resolve(f.videoId, null) }
     }
@@ -204,7 +249,7 @@ object AudioCache {
         var backoff = 1000L
         var refreshes = 0
         var plainGet = false
-        f.file.delete()
+        if (f.written == 0L) f.file.delete() // otherwise: carry on from where a previous run stopped
         FileOutputStream(f.file, true).use { out ->
             while (isActive) {
                 val pos = f.written
@@ -235,7 +280,7 @@ object AudioCache {
                 }
             }
         }
-        if (isActive) { f.finish(); _progress.update { it + (f.videoId to 1f) } }
+        if (isActive) { f.finish(); writeMeta(f, done = true); _progress.update { it + (f.videoId to 1f) } }
     }
 
     private fun fail(f: AudioFile, msg: String) {
