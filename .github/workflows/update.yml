@@ -1,0 +1,98 @@
+# Keeps Earful working by itself.
+#
+# Every day this checks which NewPipeExtractor version the NewPipe app currently uses (they test
+# every fix for YouTube changes before pinning it). If it's newer than ours, it switches to it,
+# builds a signed APK and publishes it as a GitHub Release. The app sees that release and offers
+# "Update ready · Install".
+#
+# It also builds a release whenever you push a change, or when you press "Run workflow".
+
+name: Update & release
+
+on:
+  schedule:
+    - cron: "17 4 * * *"   # every day at 04:17 UTC
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths-ignore: ["README.md"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Look for a newer YouTube reader
+        id: reader
+        run: |
+          current=$(grep -oE 'NewPipeExtractor:[0-9a-zA-Z.\-]+' app/build.gradle.kts | cut -d: -f2)
+          latest=$(curl -fsSL https://raw.githubusercontent.com/TeamNewPipe/NewPipe/dev/gradle/libs.versions.toml \
+            | grep -E '^teamnewpipe-newpipe-extractor *=' | sed -E 's/.*"(.*)".*/\1/')
+          echo "current=$current latest=$latest"
+          if [ -n "$latest" ] && [ "$latest" != "$current" ]; then
+            sed -i "s/NewPipeExtractor:$current/NewPipeExtractor:$latest/" app/build.gradle.kts
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "latest=$latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Nothing new today
+        if: github.event_name == 'schedule' && steps.reader.outputs.changed != 'true'
+        run: echo "Already on the newest reader. No build needed."
+
+      - name: Set up Java
+        if: github.event_name != 'schedule' || steps.reader.outputs.changed == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        if: github.event_name != 'schedule' || steps.reader.outputs.changed == 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Build signed APK
+        if: github.event_name != 'schedule' || steps.reader.outputs.changed == 'true'
+        env:
+          KEY_B64: ${{ secrets.EARFUL_KEYSTORE_BASE64 }}
+        run: |
+          sdkmanager "platforms;android-37.2" > /dev/null
+          if [ -z "$KEY_B64" ]; then
+            echo "::error::Add the EARFUL_KEYSTORE_BASE64 secret (see README) so updates install over your app."
+            exit 1
+          fi
+          echo "$KEY_B64" | base64 -d > "$RUNNER_TEMP/earful.keystore"
+          export EARFUL_KEYSTORE="$RUNNER_TEMP/earful.keystore"
+          VC=$((100 + GITHUB_RUN_NUMBER))
+          echo "VC=$VC" >> "$GITHUB_ENV"
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon -Pvc=$VC -Pvn="2.0.$GITHUB_RUN_NUMBER"
+          cp app/build/outputs/apk/release/app-release.apk "Earful-$VC.apk"
+
+      - name: Save the reader bump
+        if: steps.reader.outputs.changed == 'true'
+        run: |
+          git config user.name "earful-bot"
+          git config user.email "earful-bot@users.noreply.github.com"
+          git commit -am "Update YouTube reader to ${{ steps.reader.outputs.latest }}"
+          git push
+
+      - name: Publish release
+        if: github.event_name != 'schedule' || steps.reader.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Automatic build."
+          if [ "${{ steps.reader.outputs.changed }}" = "true" ]; then
+            notes="Updated the YouTube reader to keep videos loading (NewPipeExtractor ${{ steps.reader.outputs.latest }})."
+          fi
+          gh release create "build-$VC" "Earful-$VC.apk" --title "Earful 2.0.$GITHUB_RUN_NUMBER" --notes "$notes" --latest
