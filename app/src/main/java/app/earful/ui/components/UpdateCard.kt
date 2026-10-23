@@ -46,8 +46,8 @@ fun UpdateCard(modifier: Modifier = Modifier) {
             "Keeps YouTube working" + if (s.sizeBytes > 0) " · %.1f MB".format(s.sizeBytes / 1_048_576.0) else "",
             "Install",
         )
-        is UpdateState.Downloading -> Triple("Downloading update", "${(s.fraction * 100).toInt()}%", null)
-        is UpdateState.Ready -> Triple("Update downloaded", "Tap Install, then confirm", "Install")
+        is UpdateState.Downloading -> Triple("Getting the update", "${(s.fraction * 100).toInt()}% · keeps YouTube working", null)
+        is UpdateState.Ready -> Triple("Update ready", "Already downloaded · keeps YouTube working", "Install")
         UpdateState.Failed -> Triple("Couldn't download the update", "Check your connection", "Try again")
         UpdateState.Idle -> return
     }
@@ -80,8 +80,7 @@ fun UpdateCard(modifier: Modifier = Modifier) {
         if (action != null) {
             Box(
                 Modifier.pressable {
-                    if (state is UpdateState.Failed) { Updater.dismissFailure(); Updater.check(ctx, force = true) }
-                    else Updater.downloadAndInstall(ctx)
+                    Updater.downloadAndInstall(ctx) // installs, or retries a failed download
                 }.clip(CircleShape).background(p.accent).padding(horizontal = 14.dp, vertical = 7.dp)
             ) { Text(action, Type.subheadStrong, color = Color.White) }
         }

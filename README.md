@@ -21,9 +21,10 @@ days, and this project can pick that fix up **by itself**:
 
 1. Every day, `.github/workflows/update.yml` checks the reader version the NewPipe app uses.
 2. If it's newer, it switches to it, builds a signed APK and publishes it as a GitHub Release.
-3. The app checks for a new release (every 6 hours, or immediately when a video fails in a way
-   that looks like "YouTube changed"). Home then shows **Update ready · Install**: one tap to
-   download, one tap on Android's confirmation. Android never lets an app update itself silently.
+3. The app looks for a new release once when you open it fresh (not when you just switch back to
+   it), then once an hour while it stays open on screen. It never checks in the background, and
+   the check runs quietly off the main thread so the app is usable straight away. It **downloads the update by itself** (~3 MB); Home then shows **Update
+   ready · Install**: one tap, plus Android's own confirmation, which no app is allowed to skip.
 
 ### One-time setup (about 10 minutes, free)
 

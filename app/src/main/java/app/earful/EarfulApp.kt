@@ -24,9 +24,7 @@ class EarfulApp : Application(), SingletonImageLoader.Factory {
         // Keeps the audio of a video you left open; deletes anything else left over.
         AudioCache.init(this, keep = Session.keepIds())
         Updater.cleanUp(this)
-        Updater.check(this)
-        // A video failing in a way that smells like "YouTube changed": look for a fix right now.
-        AudioCache.onReaderOutdated = { Updater.check(this, force = true) }
+        Updater.cancelBackgroundChecks(this)
     }
 
     /** Thumbnails: small memory cache, 40 MB disk cap in the cache folder (cleared with the cache). */

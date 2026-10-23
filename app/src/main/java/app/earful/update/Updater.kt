@@ -1,5 +1,6 @@
 package app.earful.update
 
+import android.app.job.JobScheduler
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -15,6 +16,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
@@ -31,49 +34,60 @@ sealed interface UpdateState {
  * Keeps Earful working when YouTube changes something.
  *
  * Every day, the GitHub workflow in this project checks whether NewPipe has shipped a fix; if so
- * it builds a new APK and publishes it as a release. This class looks at that release (one tiny
- * request, at most every few hours, or right away when a video fails to load), downloads the
- * APK to the cache and hands it to Android's installer. Android always asks for one tap to
- * confirm an install — no app is allowed to update itself silently.
+ * it builds a new APK and publishes it as a release. This class looks for that release when you
+ * open the app and once an hour while it's open (never in the background), and **downloads it by
+ * itself** (a ~3 MB file) so it's sitting ready. Home then shows "Update ready · Install": one tap,
+ * then Android's own confirmation, which no app is allowed to skip.
  */
 object Updater {
-    private const val CHECK_EVERY_MS = 6 * 60 * 60 * 1000L
+    private const val JOB_ID = 4201 // only used to cancel the old background check
+
+    /** True only while Earful is on screen. Nothing is ever checked while it isn't. */
+    @Volatile var foreground = false
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val busy = Mutex()
     private val _state = MutableStateFlow<UpdateState>(UpdateState.Idle)
     val state: StateFlow<UpdateState> = _state.asStateFlow()
 
     val enabled get() = BuildConfig.UPDATE_REPO.isNotBlank()
 
-    /** Checks GitHub for a newer build. [force] skips the "every few hours" limit. */
-    fun check(context: Context, force: Boolean = false) {
-        if (!enabled) return
-        if (_state.value is UpdateState.Downloading || _state.value is UpdateState.Ready) return
-        val prefs = context.getSharedPreferences("update", Context.MODE_PRIVATE)
-        val now = System.currentTimeMillis()
-        val since = now - prefs.getLong("last_check", 0)
-        if ((!force && since < CHECK_EVERY_MS) || (force && since < 10 * 60 * 1000L)) {
-            // Still remember an update we already found earlier.
-            restore(prefs); return
-        }
-        prefs.edit().putLong("last_check", now).apply()
+    private fun dir(context: Context) = File(context.cacheDir, "updates").apply { mkdirs() }
+
+    /** A finished download from earlier (also from the background job) is "Ready" right away. */
+    private fun findReady(context: Context): File? =
+        dir(context).listFiles()?.mapNotNull { f ->
+            val vc = Regex("""Earful-(\d+)\.apk""").matchEntire(f.name)?.groupValues?.get(1)?.toIntOrNull()
+            if (vc != null && vc > BuildConfig.VERSION_CODE) vc to f else null
+        }?.maxByOrNull { it.first }?.second
+
+    /**
+     * Called once when the app is opened fresh, then once an hour while it stays open on screen —
+     * never in the background. Everything happens off the main thread: the app stays fully usable.
+     */
+    fun check(context: Context) {
+        if (!enabled || !foreground) return
+        val app = context.applicationContext
         scope.launch {
-            runCatching { latest() }.onSuccess { found ->
-                if (found != null && found.versionCode > BuildConfig.VERSION_CODE) {
-                    prefs.edit().putInt("vc", found.versionCode).putString("url", found.url)
-                        .putLong("size", found.sizeBytes).apply()
-                    _state.value = found
-                } else {
-                    prefs.edit().remove("vc").apply()
-                }
-            }
+            findReady(app)?.let { if (_state.value !is UpdateState.Downloading) _state.value = UpdateState.Ready(it) }
+            checkAndDownload(app)
         }
     }
 
-    private fun restore(prefs: android.content.SharedPreferences) {
-        val vc = prefs.getInt("vc", 0)
-        val url = prefs.getString("url", null)
-        if (vc > BuildConfig.VERSION_CODE && url != null && _state.value is UpdateState.Idle) {
-            _state.value = UpdateState.Available(vc, url, prefs.getLong("size", 0))
+    /** Looks for a newer build and, if there is one, downloads it. Safe to call from anywhere. */
+    suspend fun checkAndDownload(context: Context) {
+        if (!enabled) return
+        busy.withLock {
+            val app = context.applicationContext
+            app.getSharedPreferences("update", Context.MODE_PRIVATE).edit()
+                .putLong("last_check", System.currentTimeMillis()).apply()
+            val found = runCatching { latest() }.getOrNull() ?: return
+            if (found.versionCode <= BuildConfig.VERSION_CODE) return
+            val ready = findReady(app)
+            if (ready != null && ready.name == "Earful-${found.versionCode}.apk") {
+                _state.value = UpdateState.Ready(ready); return
+            }
+            download(app, found)
         }
     }
 
@@ -95,36 +109,46 @@ object Updater {
         }
     }
 
-    /** Downloads the update, then opens the installer. */
-    fun downloadAndInstall(context: Context) {
-        val s = _state.value
-        if (s is UpdateState.Ready) { install(context, s.file); return }
-        if (s !is UpdateState.Available) return
-        val app = context.applicationContext
+    /** Downloads to a temporary name first, so a half-finished file is never offered. */
+    private fun download(app: Context, s: UpdateState.Available) {
+        val dir = dir(app)
+        dir.listFiles()?.forEach { it.delete() } // only ever one update on disk
+        val part = File(dir, "Earful-${s.versionCode}.apk.part")
+        val out = File(dir, "Earful-${s.versionCode}.apk")
         _state.value = UpdateState.Downloading(0f)
-        scope.launch {
-            val dir = File(app.cacheDir, "updates").apply { mkdirs(); listFiles()?.forEach { it.delete() } }
-            val out = File(dir, "Earful-${s.versionCode}.apk")
-            val ok = runCatching {
-                Network.client.newCall(okhttp3.Request.Builder().url(s.url).build()).execute().use { res ->
-                    if (!res.isSuccessful) error("HTTP ${res.code}")
-                    val total = res.body.contentLength().takeIf { it > 0 } ?: s.sizeBytes
-                    res.body.byteStream().use { input ->
-                        out.outputStream().use { o ->
-                            val buf = ByteArray(64 * 1024)
-                            var done = 0L
-                            while (true) {
-                                val n = input.read(buf); if (n < 0) break
-                                o.write(buf, 0, n); done += n
-                                if (total > 0) _state.value = UpdateState.Downloading((done.toFloat() / total).coerceIn(0f, 1f))
-                            }
+        val ok = runCatching {
+            Network.client.newCall(okhttp3.Request.Builder().url(s.url).build()).execute().use { res ->
+                if (!res.isSuccessful) error("HTTP ${res.code}")
+                val total = res.body.contentLength().takeIf { it > 0 } ?: s.sizeBytes
+                res.body.byteStream().use { input ->
+                    part.outputStream().use { o ->
+                        val buf = ByteArray(64 * 1024)
+                        var done = 0L
+                        while (true) {
+                            val n = input.read(buf); if (n < 0) break
+                            o.write(buf, 0, n); done += n
+                            if (total > 0) _state.value = UpdateState.Downloading((done.toFloat() / total).coerceIn(0f, 1f))
                         }
                     }
                 }
-            }.isSuccess
-            if (!ok) { out.delete(); _state.value = UpdateState.Failed; return@launch }
-            _state.value = UpdateState.Ready(out)
-            withContext(Dispatchers.Main) { install(app, out) }
+            }
+            part.renameTo(out) || error("rename failed")
+        }.getOrElse { false }
+        if (!ok) { part.delete(); _state.value = UpdateState.Failed; return }
+        _state.value = UpdateState.Ready(out)
+    }
+
+    /** The "Install" button. Normally the file is already downloaded, so this is instant. */
+    fun downloadAndInstall(context: Context) {
+        val app = context.applicationContext
+        when (val s = _state.value) {
+            is UpdateState.Ready -> install(context, s.file)
+            is UpdateState.Available -> scope.launch {
+                busy.withLock { download(app, s) }
+                (_state.value as? UpdateState.Ready)?.let { r -> withContext(Dispatchers.Main) { install(app, r.file) } }
+            }
+            UpdateState.Failed -> { _state.value = UpdateState.Idle; scope.launch { checkAndDownload(app) } }
+            else -> Unit
         }
     }
 
@@ -149,9 +173,17 @@ object Updater {
 
     /** After an update installs, the old APK in the cache is useless: delete it. */
     fun cleanUp(context: Context) {
-        File(context.cacheDir, "updates").listFiles()?.forEach { f ->
-            val vc = Regex("""Earful-(\d+)\.apk""").matchEntire(f.name)?.groupValues?.get(1)?.toIntOrNull() ?: 0
-            if (vc <= BuildConfig.VERSION_CODE) f.delete()
+        dir(context).listFiles()?.forEach { f ->
+            val vc = Regex("""Earful-(\d+)\.apk(\.part)?""").matchEntire(f.name)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            if (vc <= BuildConfig.VERSION_CODE || f.name.endsWith(".part")) f.delete()
         }
     }
+
+    /**
+     * There are no background checks. Earlier test builds scheduled one; make sure it's gone.
+     */
+    fun cancelBackgroundChecks(context: Context) {
+        runCatching { context.getSystemService(JobScheduler::class.java)?.cancel(JOB_ID) }
+    }
 }
+
