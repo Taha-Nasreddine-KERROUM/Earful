@@ -112,37 +112,6 @@ fun VideoRow(video: Video, saved: Boolean, onOpen: () -> Unit, onToggleSave: () 
     }
 }
 
-/**
- * "Add to queue". The icon briefly turns into a tick so you know it took, without a dialog.
- */
-@Composable
-fun QueueButton(onQueue: () -> Unit, tint: Color, hit: Int = 44, size: Int = 22) {
-    val view = LocalView.current
-    val scope = rememberCoroutineScope()
-    val pop = remember { Animatable(1f) }
-    var added by remember { mutableStateOf(false) }
-    LaunchedEffect(added) { if (added) { kotlinx.coroutines.delay(1600); added = false } }
-    Box(
-        Modifier
-            .size(hit.dp)
-            .pressable(scaleTo = 0.85f, label = "Add to queue") {
-                Haptics.confirm(view)
-                onQueue()
-                added = true
-                scope.launch { pop.snapTo(0.7f); pop.animateTo(1f, Motion.lively()) }
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            if (added) Icons.QueueAdded else Icons.QueueAdd,
-            tint = if (added) LocalPalette.current.accent else tint,
-            size = size.dp,
-            modifier = Modifier.graphicsLayer { scaleX = pop.value; scaleY = pop.value },
-            contentDescription = "Add to queue",
-        )
-    }
-}
-
 @Composable
 fun DurationBadge(sec: Long, modifier: Modifier = Modifier) {
     if (sec <= 0) return
@@ -150,33 +119,6 @@ fun DurationBadge(sec: Long, modifier: Modifier = Modifier) {
         modifier.clip(RoundedCornerShape(6.dp)).background(Color(0xB3000000)).padding(horizontal = 6.dp, vertical = 2.dp)
     ) {
         Text(Format.duration(sec), Type.captionStrong.copy(fontFeatureSettings = "tnum"), color = Color.White)
-    }
-}
-
-/** Bookmark that pops when toggled — a small reward that confirms the action without a dialog. */
-@Composable
-fun SaveButton(saved: Boolean, onToggle: () -> Unit, tint: Color, size: Int = 22, hit: Int = 44) {
-    val view = LocalView.current
-    val scope = rememberCoroutineScope()
-    val pop = remember { Animatable(1f) }
-    val accent = LocalPalette.current.accent
-    Box(
-        Modifier
-            .size(hit.dp) // ~Apple's minimum hit target
-            .pressable(scaleTo = 0.85f, role = Role.Switch, label = if (saved) "Remove from Saved" else "Save for later") {
-                if (!saved) Haptics.confirm(view) else Haptics.tick(view)
-                onToggle()
-                scope.launch { pop.snapTo(0.7f); pop.animateTo(1f, Motion.lively()) }
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            if (saved) Icons.BookmarkFill else Icons.Bookmark,
-            tint = if (saved) accent else tint,
-            size = size.dp,
-            modifier = Modifier.graphicsLayer { scaleX = pop.value; scaleY = pop.value },
-            contentDescription = if (saved) "Saved" else "Save for later",
-        )
     }
 }
 

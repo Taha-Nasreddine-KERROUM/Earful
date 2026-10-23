@@ -44,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
@@ -150,6 +151,15 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
             beyondViewportPageCount = 1, // the other page is already laid out: swipes never stutter
             key = { it },
         ) { page ->
+          // Depth while swiping: the page you're leaving settles back and dims a little, like
+          // a card sliding under the next one, instead of two flat pages scrolling side by side.
+          Box(Modifier.fillMaxSize().graphicsLayer {
+              val off = ((pager.currentPage - page) + pager.currentPageOffsetFraction)
+              val a = kotlin.math.abs(off).coerceIn(0f, 1f)
+              val s = 1f - 0.05f * a
+              scaleX = s; scaleY = s
+              alpha = 1f - 0.3f * a
+          }) {
             when (page) {
                 0 -> HomeScreen(
                     contentBottom, onPlay = ::play, onOpenSearch = { searchOpen = true },
@@ -160,6 +170,7 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
                     toast = Toast("Removed from Saved", "Undo", onAction = { Library.toggleSaved(v) })
                 })
             }
+          }
         }
 
         AnimatedVisibility(
@@ -171,7 +182,7 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
         }
 
         if (!searchOpen) {
-            TabBar(tab, Modifier.align(Alignment.BottomCenter)) { t ->
+            TabBar(tab, { pager.currentPage + pager.currentPageOffsetFraction }, Modifier.align(Alignment.BottomCenter)) { t ->
                 // Tapping Home while already on Home just glides back to the top (no reload).
                 if (t == Tab.Home && tab == Tab.Home) homeTopSignal++ else goTo(t)
             }
@@ -224,14 +235,14 @@ private fun StatusBarFollowsSheet(sheet: SheetState) {
 }
 
 @Composable
-private fun TabBar(selected: Tab, modifier: Modifier, onSelect: (Tab) -> Unit) {
+private fun TabBar(selected: Tab, position: () -> Float, modifier: Modifier, onSelect: (Tab) -> Unit) {
     val p = LocalPalette.current
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     Column(modifier.fillMaxWidth().background(p.chrome)) {
         Box(Modifier.fillMaxWidth().height(0.5.dp).background(p.separator))
         Row(Modifier.fillMaxWidth().height(52.dp)) {
-            TabItem("Home", Icons.Home, Icons.HomeFill, selected == Tab.Home, Modifier.weight(1f)) { onSelect(Tab.Home) }
-            TabItem("Saved", Icons.Bookmark, Icons.BookmarkFill, selected == Tab.Saved, Modifier.weight(1f)) { onSelect(Tab.Saved) }
+            TabItem("Home", Icons.Home, Icons.HomeFill, selected == Tab.Home, { 1f - position().coerceIn(0f, 1f) }, Modifier.weight(1f)) { onSelect(Tab.Home) }
+            TabItem("Saved", Icons.Bookmark, Icons.BookmarkFill, selected == Tab.Saved, { position().coerceIn(0f, 1f) }, Modifier.weight(1f)) { onSelect(Tab.Saved) }
         }
         Spacer(Modifier.height(navBottom))
     }
@@ -243,19 +254,36 @@ private fun TabItem(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     iconSelected: androidx.compose.ui.graphics.vector.ImageVector,
     selected: Boolean,
+    amount: () -> Float, // 0..1: how "on" this tab is, following your finger during a swipe
     modifier: Modifier,
     onClick: () -> Unit,
 ) {
     val p = LocalPalette.current
-    val c = if (selected) p.accent else p.secondary
+    // When a tab becomes active its icon dips and springs back, like a key being pressed.
+    val pop = remember { androidx.compose.animation.core.Animatable(1f) }
+    var first by remember { mutableStateOf(true) }
+    LaunchedEffect(selected) {
+        if (first) { first = false; return@LaunchedEffect }
+        if (selected) { pop.snapTo(0.78f); pop.animateTo(1f, app.earful.ui.theme.Motion.lively()) }
+    }
     Column(
         modifier.fillMaxSize().pressable(scaleTo = 0.9f, role = Role.Tab, label = label, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
     ) {
-        Icon(if (selected) iconSelected else icon, c, size = 25.dp, contentDescription = label)
+        Box(Modifier.graphicsLayer { scaleX = pop.value; scaleY = pop.value; translationY = (1f - pop.value) * 14f }) {
+            // Outline and filled icons cross-fade with the swipe, so the tab "fills in" as you go.
+            Icon(icon, p.secondary, size = 25.dp, contentDescription = label,
+                modifier = Modifier.graphicsLayer { alpha = 1f - amount() })
+            Icon(iconSelected, p.accent, size = 25.dp,
+                modifier = Modifier.graphicsLayer { alpha = amount() })
+        }
         Spacer(Modifier.height(2.dp))
-        Text(label, Type.caption.copy(fontSize = androidx.compose.ui.unit.TextUnit(10.5f, androidx.compose.ui.unit.TextUnitType.Sp)), color = c)
+        Box {
+            val style = Type.caption.copy(fontSize = androidx.compose.ui.unit.TextUnit(10.5f, androidx.compose.ui.unit.TextUnitType.Sp))
+            Text(label, style, color = p.secondary, modifier = Modifier.graphicsLayer { alpha = 1f - amount() })
+            Text(label, style, color = p.accent, modifier = Modifier.graphicsLayer { alpha = amount() })
+        }
     }
 }
 

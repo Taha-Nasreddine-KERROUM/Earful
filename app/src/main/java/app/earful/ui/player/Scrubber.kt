@@ -62,12 +62,20 @@ fun Scrubber(
 
     val dur = durationMs.coerceAtLeast(1)
     val live = (positionMs.toFloat() / dur).coerceIn(0f, 1f)
-    val fraction = when {
+    val target = when {
         dragging -> dragFraction
         held != null -> held!!
         else -> live
     }
     LaunchedEffect(held) { if (held != null) { delay(700); held = null } }
+    // Jumps (a tap, ±10 s, a skipped sponsor) glide the bar to its new place so your eye can follow
+    // where you went; normal playback and dragging stay 1:1 (no animation, no extra frames).
+    val shown = remember { androidx.compose.animation.core.Animatable(target) }
+    LaunchedEffect(target, dragging) {
+        if (!dragging && kotlin.math.abs(target - shown.value) > 0.015f) shown.animateTo(target, Motion.sheet())
+        else shown.snapTo(target)
+    }
+    val fraction = shown.value
 
     val barHeight by animateDpAsState(if (dragging) 11.dp else 6.dp, Motion.snappy(), label = "bar")
     val brightness by animateFloatAsState(if (dragging) 1f else 0.78f, Motion.snappy(), label = "bright")

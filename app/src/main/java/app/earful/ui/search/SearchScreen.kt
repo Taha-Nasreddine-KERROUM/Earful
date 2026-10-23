@@ -221,7 +221,7 @@ fun SearchScreen(bottomPadding: Dp, onPlay: (Video) -> Unit, onQueue: (Video) ->
                 model.failed -> item { Message("Search didn't go through", "Check your connection.", "Try again") { model.submit(submitted) } }
                 model.results.isEmpty() -> item { Message("No results", "Try different words.", null) {} }
                 else -> items(model.results, key = { it.id }) { v ->
-                    VideoCard(v, saved = v.id in savedIds, onOpen = { onPlay(v) }, onToggleSave = { Library.toggleSaved(v) }, onQueue = { onQueue(v) })
+                    VideoCard(v, saved = v.id in savedIds, onOpen = { onPlay(v) }, onToggleSave = { Library.toggleSaved(v) }, onQueue = { onQueue(v) }, modifier = Modifier.animateItem())
                 }
             }
         }

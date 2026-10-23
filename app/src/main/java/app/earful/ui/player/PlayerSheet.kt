@@ -3,6 +3,7 @@ package app.earful.ui.player
 import android.content.Context
 import android.os.Build
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -529,16 +530,12 @@ private fun NowPlayingControls(
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            CircleButton(onClick = { conn.seekBy(-10_000) }, size = 72.dp, label = "Back 10 seconds") {
-                SkipIcon(10, forward = false, tint = Color.White, size = 38.dp)
-            }
+            SkipButton(forward = false) { conn.seekBy(-10_000) }
             CircleButton(onClick = { conn.togglePlay() }, size = 92.dp, enabled = !np.ended,
                 label = if (np.playing) "Pause" else "Play") {
                 PlayPauseGlyph(showPause = np.playing || (np.waiting && error == null), ended = np.ended, tint = Color.White, size = 56.dp)
             }
-            CircleButton(onClick = { conn.seekBy(10_000) }, size = 72.dp, label = "Forward 10 seconds") {
-                SkipIcon(10, forward = true, tint = Color.White, size = 38.dp)
-            }
+            SkipButton(forward = true) { conn.seekBy(10_000) }
         }
         Spacer(Modifier.height(20.dp))
         StatusLine(np, downloaded, error, onRetry = { conn.retry(np.video) })
@@ -593,23 +590,79 @@ private fun StatusLine(np: NowPlaying, downloaded: Float, error: String?, onRetr
 /** Opens the queue. Also the hint that swiping up does the same. */
 @Composable
 private fun UpNextButton(upcoming: Int, enabled: Boolean, onClick: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    // The chevron hops upward when tapped: it points where the list is about to come from.
+    val hop = remember { Animatable(0f) }
+    // The count bumps when a video joins the queue, so you see it land.
+    val bump = remember { Animatable(1f) }
+    var lastCount by remember { mutableStateOf(upcoming) }
+    LaunchedEffect(upcoming) {
+        if (upcoming > lastCount) { bump.snapTo(1.45f); bump.animateTo(1f, Motion.lively()) }
+        lastCount = upcoming
+    }
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Row(
             Modifier.clip(RoundedCornerShape(50))
-                .clickable(enabled = enabled, onClickLabel = "Up next", onClick = onClick)
+                .clickable(enabled = enabled, onClickLabel = "Up next") {
+                    scope.launch { hop.animateTo(1f, tween(110)); hop.animateTo(0f, Motion.lively()) }
+                    onClick()
+                }
                 .padding(horizontal = 14.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.ChevronUp, Color.White.copy(alpha = 0.6f), size = 16.dp)
+            Icon(Icons.ChevronUp, Color.White.copy(alpha = 0.6f), size = 16.dp,
+                modifier = Modifier.graphicsLayer { translationY = -hop.value * 5.dp.toPx() })
             Spacer(Modifier.width(6.dp))
             Text("Up next", Type.footnote.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold), color = Color.White.copy(alpha = 0.7f))
             if (upcoming > 0) {
                 Spacer(Modifier.width(6.dp))
                 Box(
-                    Modifier.clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = 0.18f))
+                    Modifier.graphicsLayer { scaleX = bump.value; scaleY = bump.value }
+                        .clip(RoundedCornerShape(50)).background(Color.White.copy(alpha = 0.18f))
                         .padding(horizontal = 7.dp, vertical = 1.dp)
                 ) { Text("$upcoming", Type.captionStrong.copy(fontFeatureSettings = "tnum"), color = Color.White) }
             }
+        }
+    }
+}
+
+/**
+ * ±10 s. The arrow turns the way time moves, like nudging a dial, and the amount floats up off the
+ * button. Tapping again quickly adds up ("+20 s"), so a few taps read as one move.
+ */
+@Composable
+private fun SkipButton(forward: Boolean, onSkip: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    val turn = remember { Animatable(0f) }
+    val float = remember { Animatable(0f) }
+    var total by remember { mutableStateOf(0) }
+    var lastTap by remember { mutableStateOf(0L) }
+    Box(contentAlignment = Alignment.Center) {
+        CircleButton(
+            onClick = {
+                onSkip()
+                val now = System.currentTimeMillis()
+                total = if (now - lastTap < 900) total + 10 else 10
+                lastTap = now
+                scope.launch { turn.snapTo(0f); turn.animateTo(1f, tween(120)); turn.animateTo(0f, Motion.lively()) }
+                scope.launch { float.snapTo(0f); float.animateTo(1f, tween(750, easing = FastOutSlowInEasing)) }
+            },
+            size = 72.dp,
+            label = if (forward) "Forward 10 seconds" else "Back 10 seconds",
+        ) {
+            SkipIcon(10, forward = forward, tint = Color.White, size = 38.dp,
+                modifier = Modifier.graphicsLayer { rotationZ = turn.value * if (forward) 38f else -38f })
+        }
+        if (float.value in 0.001f..0.999f) {
+            Text(
+                (if (forward) "+" else "−") + total + " s",
+                Type.footnote.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, fontFeatureSettings = "tnum"),
+                color = Color.White,
+                modifier = Modifier.align(Alignment.TopCenter).graphicsLayer {
+                    translationY = -float.value * 22.dp.toPx()
+                    alpha = if (float.value < 0.2f) float.value / 0.2f else 1f - (float.value - 0.2f) / 0.8f
+                },
+            )
         }
     }
 }
@@ -619,11 +672,12 @@ fun PlayPauseGlyph(showPause: Boolean, ended: Boolean, tint: Color, size: Dp) {
     val t by animateFloatAsState(if (showPause && !ended) 1f else 0f, Motion.snappy(), label = "pp")
     val dim = if (ended) 0.35f else 1f
     Box(contentAlignment = Alignment.Center) {
+        // A quarter-turn swap, like flipping a switch: one glyph turns away as the other turns in.
         Icon(Icons.Play, tint, size = size, modifier = Modifier.graphicsLayer {
-            alpha = (1f - t) * dim; scaleX = 0.6f + 0.4f * (1f - t); scaleY = scaleX
+            alpha = (1f - t) * dim; scaleX = 0.6f + 0.4f * (1f - t); scaleY = scaleX; rotationZ = -45f * t
         })
         Icon(Icons.Pause, tint, size = size, modifier = Modifier.graphicsLayer {
-            alpha = t; scaleX = 0.6f + 0.4f * t; scaleY = scaleX
+            alpha = t; scaleX = 0.6f + 0.4f * t; scaleY = scaleX; rotationZ = 45f * (1f - t)
         })
     }
 }

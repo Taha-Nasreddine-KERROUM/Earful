@@ -56,7 +56,8 @@ fun SavedScreen(bottomPadding: Dp, onPlay: (Video) -> Unit, onQueue: (Video) -> 
         }
         if (saved.isEmpty()) item { Empty() }
         items(saved, key = { it.id }) { v ->
-            VideoRow(v, saved = true, onOpen = { onPlay(v) }, onToggleSave = { Library.removeSaved(v.id); onRemoved(v) }, onQueue = { onQueue(v) })
+            VideoRow(v, saved = true, onOpen = { onPlay(v) }, onToggleSave = { Library.removeSaved(v.id); onRemoved(v) }, onQueue = { onQueue(v) },
+                modifier = Modifier.animateItem())
         }
     }
 }

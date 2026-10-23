@@ -95,6 +95,7 @@ fun HomeScreen(
     val density = LocalDensity.current
     val view = LocalView.current
     val scope = rememberCoroutineScope()
+    var logoBeat by remember { androidx.compose.runtime.mutableIntStateOf(0) }
 
     // Top bar slides away while you scroll down and returns the moment you scroll up.
     var barHeightPx by remember { mutableFloatStateOf(0f) }
@@ -182,7 +183,8 @@ fun HomeScreen(
                 item { EmptyForYou(onOpenSearch) }
             } else {
                 items(forYou, key = { it.id }, contentType = { "card" }) { v ->
-                    VideoCard(v, saved = v.id in savedIds, onOpen = { onPlay(v) }, onToggleSave = { Library.toggleSaved(v) }, onQueue = { onQueue(v) })
+                    VideoCard(v, saved = v.id in savedIds, onOpen = { onPlay(v) }, onToggleSave = { Library.toggleSaved(v) }, onQueue = { onQueue(v) },
+                        modifier = Modifier.animateItem())
                 }
                 if (model.loadingMore) item(key = "more", contentType = "skeleton") { VideoCardSkeleton() }
             }
@@ -217,6 +219,7 @@ fun HomeScreen(
             // Logo: back to the top *and* fresh picks.
             Box(
                 Modifier.pressable(scaleTo = 0.94f, label = "Refresh") {
+                    logoBeat++
                     scope.launch {
                         scrollToTop()
                         if (Library.recentListened(1).isNotEmpty()) {
@@ -225,10 +228,19 @@ fun HomeScreen(
                         }
                     }
                 }.padding(horizontal = 8.dp, vertical = 6.dp)
-            ) { Wordmark() }
+            ) { Wordmark(beat = logoBeat) }
             Spacer(Modifier.weight(1f))
-            Box(Modifier.size(44.dp).pressable(scaleTo = 0.85f, label = "Search", onClick = onOpenSearch), contentAlignment = Alignment.Center) {
-                Icon(Icons.Search, p.label, size = 24.dp, contentDescription = "Search")
+            // The magnifier tilts as if picked up, then you're in search.
+            val tilt = remember { androidx.compose.animation.core.Animatable(0f) }
+            Box(Modifier.size(44.dp).pressable(scaleTo = 0.85f, label = "Search") {
+                scope.launch {
+                    tilt.animateTo(-20f, androidx.compose.animation.core.tween(110))
+                    tilt.animateTo(0f, Motion.lively())
+                }
+                onOpenSearch()
+            }, contentAlignment = Alignment.Center) {
+                Icon(Icons.Search, p.label, size = 24.dp, contentDescription = "Search",
+                    modifier = Modifier.graphicsLayer { rotationZ = tilt.value })
             }
         }
     }
@@ -299,13 +311,27 @@ private fun EmptyForYou(onOpenSearch: () -> Unit) {
 }
 
 @Composable
-fun Wordmark() {
+fun Wordmark(beat: Int = 0) {
     val p = LocalPalette.current
+    // On refresh the bars jump like a level meter catching a beat, one after another.
+    val bars = remember { List(5) { androidx.compose.animation.core.Animatable(1f) } }
+    LaunchedEffect(beat) {
+        if (beat == 0) return@LaunchedEffect
+        val peaks = listOf(1.9f, 0.55f, 1.35f, 0.6f, 1.8f)
+        bars.forEachIndexed { i, a ->
+            launch {
+                kotlinx.coroutines.delay(i * 45L)
+                a.animateTo(peaks[i], androidx.compose.animation.core.tween(110))
+                a.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.45f, stiffness = 420f))
+            }
+        }
+    }
     Row(verticalAlignment = Alignment.CenterVertically) {
         // Five bars, like the app icon: a waveform that reads as "listen" at a glance.
         Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-            listOf(7, 13, 18, 11, 6).forEach { h ->
-                Box(Modifier.width(3.dp).height(h.dp).clip(RoundedCornerShape(2.dp)).background(p.accent))
+            listOf(7, 13, 18, 11, 6).forEachIndexed { i, h ->
+                Box(Modifier.width(3.dp).height(h.dp).graphicsLayer { scaleY = bars[i].value }
+                    .clip(RoundedCornerShape(2.dp)).background(p.accent))
             }
         }
         Spacer(Modifier.width(8.dp))
