@@ -1,0 +1,13 @@
+<resources>
+    <style name="Theme.Earful" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/bg</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:colorAccent">@color/accent</item>
+    </style>
+    <color name="bg">#FFFFFFFF</color>
+    <color name="accent">#FFFA2D48</color>
+    <color name="icon_bg_start">#FFFF2D55</color>
+    <color name="icon_bg_end">#FFFF7A3D</color>
+</resources>
