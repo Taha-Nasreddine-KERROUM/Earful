@@ -142,6 +142,13 @@ class PlayerConnection(private val context: Context) {
         c.play()
     }
 
+    /** Takes [videoId] back out of the upcoming part of the queue. */
+    fun dequeue(videoId: String) {
+        val q = _queue.value
+        val e = q.entries.firstOrNull { it.video.id == videoId && !it.passed && !it.current } ?: return
+        remove(e.index)
+    }
+
     /** Removes a row from the queue (never the one playing). */
     fun remove(index: Int) = withController { c ->
         if (index !in 0 until c.mediaItemCount || index == c.currentMediaItemIndex) return@withController

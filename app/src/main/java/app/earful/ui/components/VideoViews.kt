@@ -79,7 +79,7 @@ fun VideoCard(video: Video, saved: Boolean, onOpen: () -> Unit, onToggleSave: ()
             }
             Column {
                 SaveButton(saved, onToggleSave, tint = p.secondary, hit = 40)
-                QueueButton(onQueue, tint = p.secondary, hit = 40)
+                QueueButton(video.id in LocalQueuedIds.current, onQueue, tint = p.secondary, hit = 40)
             }
         }
     }
@@ -107,7 +107,7 @@ fun VideoRow(video: Video, saved: Boolean, onOpen: () -> Unit, onToggleSave: () 
         }
         Column {
             SaveButton(saved, onToggleSave, tint = if (saved) p.accent else p.secondary, hit = 36)
-            QueueButton(onQueue, tint = p.secondary, hit = 36)
+            QueueButton(video.id in LocalQueuedIds.current, onQueue, tint = p.secondary, hit = 36)
         }
     }
 }

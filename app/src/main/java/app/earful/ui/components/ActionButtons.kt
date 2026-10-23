@@ -35,7 +35,6 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import app.earful.ui.theme.LocalPalette
 import app.earful.ui.theme.Motion
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -87,41 +86,45 @@ fun SaveButton(saved: Boolean, onToggle: () -> Unit, tint: Color, size: Int = 22
     }
 }
 
+/** Video ids currently waiting in (or playing from) the queue; drives the queue toggles. */
+val LocalQueuedIds = androidx.compose.runtime.compositionLocalOf<Set<String>> { emptySet() }
+
 /**
- * Add to queue. The list "takes" the video: its lines ripple outward one after another, while the
- * plus turns a quarter and sinks away as a tick is drawn in its place. After a moment it resets.
+ * Add to / remove from queue — a toggle, like the bookmark. Adding: the list's lines ripple
+ * outward one after another (the list making room) while the plus turns a quarter and sinks
+ * away as a tick is drawn in. It stays ticked while the video is queued. Tapping again
+ * un-draws the tick and the plus turns back: the video leaves the queue.
  */
 @Composable
-fun QueueButton(onQueue: () -> Unit, tint: Color, hit: Int = 44, size: Int = 22) {
+fun QueueButton(queued: Boolean, onToggle: () -> Unit, tint: Color, hit: Int = 44, size: Int = 22) {
     val view = LocalView.current
-    val scope = rememberCoroutineScope()
     val accent = LocalPalette.current.accent
-    val done = remember { Animatable(0f) }  // plus → tick
-    val wave = remember { Animatable(0f) }  // lines ripple
-    var busy by remember { mutableStateOf(false) }
+    val done = remember { Animatable(if (queued) 1f else 0f) }  // plus ↔ tick
+    val wave = remember { Animatable(0f) }                      // lines ripple
+    var first by remember { mutableStateOf(true) }
+    LaunchedEffect(queued) {
+        if (first) { first = false; done.snapTo(if (queued) 1f else 0f); return@LaunchedEffect }
+        if (queued) {
+            launch { wave.snapTo(0f); wave.animateTo(1f, tween(520)) }
+            done.animateTo(1f, tween(380, easing = FastOutSlowInEasing))
+        } else {
+            done.animateTo(0f, Motion.lively())
+        }
+    }
 
     Box(
         Modifier
             .size(hit.dp)
-            .semantics { contentDescription = "Add to queue" } // for TalkBack: the icon is drawn, not an image
-            .pressable(scaleTo = 0.85f, label = "Add to queue") {
-                Haptics.confirm(view)
-                onQueue()
-                if (busy) return@pressable
-                busy = true
-                scope.launch {
-                    launch { wave.snapTo(0f); wave.animateTo(1f, tween(520)) }
-                    done.animateTo(1f, tween(380, easing = FastOutSlowInEasing))
-                    delay(1300)
-                    done.animateTo(0f, Motion.lively())
-                    busy = false
-                }
+            .semantics { contentDescription = if (queued) "Remove from queue" else "Add to queue" }
+            .pressable(scaleTo = 0.85f, role = Role.Switch, label = if (queued) "Remove from queue" else "Add to queue") {
+                if (!queued) Haptics.confirm(view) else Haptics.tick(view)
+                onToggle()
             },
         contentAlignment = Alignment.Center,
     ) {
         Canvas(Modifier.size(size.dp)) {
             val u = this.size.minDimension / 24f
-            val t = done.value
+            val t = done.value.coerceIn(0f, 1f)
             val color = lerp(tint, accent, t)
             val stroke = 1.9f * u
 
@@ -133,7 +136,7 @@ fun QueueButton(onQueue: () -> Unit, tint: Color, hit: Int = 44, size: Int = 22)
                 drawLine(color, Offset(4f * u, y * u), Offset((end + reach * bump) * u, y * u), stroke, StrokeCap.Round)
             }
 
-            // The plus: turns 90° and shrinks into the tick.
+            // The plus: turns 90° and shrinks into the tick (and back out when released).
             if (t < 1f) {
                 val c = Offset(18f * u, 16.5f * u)
                 rotate(90f * t, pivot = c) {
@@ -144,7 +147,7 @@ fun QueueButton(onQueue: () -> Unit, tint: Color, hit: Int = 44, size: Int = 22)
                 }
             }
 
-            // The tick: drawn in like a pen stroke.
+            // The tick: drawn in like a pen stroke, un-drawn on release.
             val draw = ((t - 0.3f) / 0.7f).coerceIn(0f, 1f)
             if (draw > 0f) {
                 val path = Path().apply {

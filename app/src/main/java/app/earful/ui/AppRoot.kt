@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -105,11 +106,20 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     val bottomBar by animateDpAsState(if (searchOpen) navBottom else tabBarHeight, label = "bar")
     val contentBottom = bottomBar + if (np != null) 72.dp else 0.dp
 
+    // The queue button is a toggle: on = waiting in the queue, off = not.
+    val queueState by conn.queue.collectAsStateWithLifecycle()
+    val queuedIds = remember(queueState) { queueState.entries.filter { !it.passed }.mapTo(HashSet()) { it.video.id } }
+
     fun enqueue(v: Video) {
-        when (conn.enqueue(v)) {
-            EnqueueResult.Added -> toast = Toast("Added to queue")
-            EnqueueResult.AlreadyQueued -> toast = Toast("Already in the queue")
-            EnqueueResult.StartedPlaying -> Unit // the mini player appearing says it all
+        val current = queueState.entries.firstOrNull { it.current }?.video?.id
+        when {
+            v.id == current -> toast = Toast("Playing now")
+            v.id in queuedIds -> { conn.dequeue(v.id); toast = Toast("Removed from queue") }
+            else -> when (conn.enqueue(v)) {
+                EnqueueResult.Added -> toast = Toast("Added to queue")
+                EnqueueResult.AlreadyQueued -> toast = Toast("Already in the queue")
+                EnqueueResult.StartedPlaying -> Unit // the mini player appearing says it all
+            }
         }
     }
 
@@ -144,6 +154,7 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
 
     StatusBarFollowsSheet(sheet)
 
+    CompositionLocalProvider(app.earful.ui.components.LocalQueuedIds provides queuedIds) {
     Box(Modifier.fillMaxSize().background(p.bg)) {
         HorizontalPager(
             state = pager,
@@ -201,6 +212,7 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
                 },
             )
         }
+    }
     }
 
     BackHandler(enabled = searchOpen && !sheet.isExpanded) { keyboard?.hide(); searchOpen = false }
