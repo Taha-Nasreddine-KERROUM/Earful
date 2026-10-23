@@ -6,6 +6,7 @@
 # "Update ready · Install".
 #
 # It also builds a release whenever you push a change, or when you press "Run workflow".
+# Works whether the project sits at the top of the repository or inside an "earful" folder.
 
 name: Update & release
 
@@ -15,7 +16,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main, master]
-    paths-ignore: ["README.md"]
+    paths-ignore: ["**/README.md"]
 
 permissions:
   contents: write
@@ -28,16 +29,31 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - name: Find the project
+        run: |
+          if [ -f settings.gradle.kts ]; then dir=.
+          elif [ -f earful/settings.gradle.kts ]; then dir=earful
+          else
+            dir=$(dirname "$(find . -name settings.gradle.kts -not -path '*/node_modules/*' | head -1)")
+          fi
+          if [ ! -f "$dir/app/build.gradle.kts" ]; then
+            echo "::error::Couldn't find the Earful project (settings.gradle.kts + app/). Upload the project files to the repository."
+            exit 1
+          fi
+          echo "Project folder: $dir"
+          echo "PROJECT_DIR=$dir" >> "$GITHUB_ENV"
 
       - name: Look for a newer YouTube reader
         id: reader
         run: |
-          current=$(grep -oE 'NewPipeExtractor:[0-9a-zA-Z.\-]+' app/build.gradle.kts | cut -d: -f2)
+          cd "$PROJECT_DIR"
+          current=$(grep -oE 'NewPipeExtractor:[0-9a-zA-Z.\-]+' app/build.gradle.kts | cut -d: -f2 || true)
           latest=$(curl -fsSL https://raw.githubusercontent.com/TeamNewPipe/NewPipe/dev/gradle/libs.versions.toml \
-            | grep -E '^teamnewpipe-newpipe-extractor *=' | sed -E 's/.*"(.*)".*/\1/')
+            | grep -E '^teamnewpipe-newpipe-extractor *=' | sed -E 's/.*"(.*)".*/\1/' || true)
           echo "current=$current latest=$latest"
-          if [ -n "$latest" ] && [ "$latest" != "$current" ]; then
+          if [ -n "$latest" ] && [ -n "$current" ] && [ "$latest" != "$current" ]; then
             sed -i "s/NewPipeExtractor:$current/NewPipeExtractor:$latest/" app/build.gradle.kts
             echo "changed=true" >> "$GITHUB_OUTPUT"
             echo "latest=$latest" >> "$GITHUB_OUTPUT"
@@ -49,9 +65,21 @@ jobs:
         if: github.event_name == 'schedule' && steps.reader.outputs.changed != 'true'
         run: echo "Already on the newest reader. No build needed."
 
+      - name: Check the signing key secret
+        if: github.event_name != 'schedule' || steps.reader.outputs.changed == 'true'
+        env:
+          KEY_B64: ${{ secrets.EARFUL_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEY_B64" ]; then
+            echo "::error::Missing secret EARFUL_KEYSTORE_BASE64. Settings → Secrets and variables → Actions → New repository secret, paste the content of earful-signing-key.txt."
+            exit 1
+          fi
+          echo "$KEY_B64" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/earful.keystore"
+          echo "EARFUL_KEYSTORE=$RUNNER_TEMP/earful.keystore" >> "$GITHUB_ENV"
+
       - name: Set up Java
         if: github.event_name != 'schedule' || steps.reader.outputs.changed == 'true'
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
@@ -62,21 +90,14 @@ jobs:
 
       - name: Build signed APK
         if: github.event_name != 'schedule' || steps.reader.outputs.changed == 'true'
-        env:
-          KEY_B64: ${{ secrets.EARFUL_KEYSTORE_BASE64 }}
         run: |
+          cd "$PROJECT_DIR"
           sdkmanager "platforms;android-37.2" > /dev/null
-          if [ -z "$KEY_B64" ]; then
-            echo "::error::Add the EARFUL_KEYSTORE_BASE64 secret (see README) so updates install over your app."
-            exit 1
-          fi
-          echo "$KEY_B64" | base64 -d > "$RUNNER_TEMP/earful.keystore"
-          export EARFUL_KEYSTORE="$RUNNER_TEMP/earful.keystore"
           VC=$((100 + GITHUB_RUN_NUMBER))
           echo "VC=$VC" >> "$GITHUB_ENV"
           chmod +x gradlew
           ./gradlew :app:assembleRelease --no-daemon -Pvc=$VC -Pvn="2.0.$GITHUB_RUN_NUMBER"
-          cp app/build/outputs/apk/release/app-release.apk "Earful-$VC.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/Earful-$VC.apk"
 
       - name: Save the reader bump
         if: steps.reader.outputs.changed == 'true'
