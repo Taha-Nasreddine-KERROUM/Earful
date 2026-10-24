@@ -127,10 +127,26 @@ class SheetState {
     val isExpanded get() = progress.targetValue > 0.5f
     val isQueueOpen get() = queue.targetValue > 0.5f
 
-    /** Rises like a calm tide. Opened from the mini player, the picture, title and controls float up after it. */
+    /** On its way up: Now Playing is built (and ready) before it starts to move. */
+    var rising by mutableStateOf(false)
+        private set
+
+    /** Rises like a calm tide; its contents stretch with the speed and settle as it arrives. */
     suspend fun expand(velocity: Float = 0f) {
-        water.opening(fromRest = progress.value < 0.05f && !progress.isRunning)
-        progress.animateTo(1f, Motion.tide(), velocity)
+        val fromRest = progress.value < 0.05f && !progress.isRunning
+        rising = true
+        try {
+            if (fromRest) {
+                // Build Now Playing first (two frames, unseen), so the rise itself never stalls
+                // halfway for it.
+                withFrameNanos { }
+                withFrameNanos { }
+            }
+            water.opening(fromRest = fromRest)
+            progress.animateTo(1f, Motion.tide(), velocity)
+        } finally {
+            rising = false
+        }
     }
 
     /** Comes down like heavy water, and dips a little into the tab bar where it lands. */
@@ -515,9 +531,11 @@ fun PlayerSheet(
         fun held(): Float { w.frame; return w.contentOffset(pNow()) } // contents trailing / settling
         fun fade() = ((pNow() - 0.35f) / 0.65f).coerceIn(0f, 1f)      // Now Playing's contents
         val showChrome by remember { derivedStateOf { sheet.progress.value < 1f } }
-        val showBackdrop by remember { derivedStateOf { sheet.progress.value > 0.001f } }
+        // Now Playing's layers are built as soon as it's about to rise (or a finger lifts it),
+        // never in the middle of the movement.
+        val showBackdrop by remember { derivedStateOf { sheet.progress.value > 0.001f || sheet.rising || sheet.water.dragging } }
         val showMini by remember { derivedStateOf { sheet.progress.value < 0.3f } }
-        val showFull by remember { derivedStateOf { sheet.progress.value > 0.2f } }
+        val showFull by remember { derivedStateOf { sheet.progress.value > 0.2f || sheet.rising || sheet.water.dragging } }
         val fullyOpen by remember { derivedStateOf { sheet.progress.value > 0.99f } }
         val queueShown by remember { derivedStateOf { sheet.queue.value > 0.001f && sheet.progress.value > 0.9f } }
 

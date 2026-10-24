@@ -67,6 +67,7 @@ import app.earful.ui.components.Text
 import app.earful.ui.components.VideoCard
 import app.earful.ui.components.VideoCardSkeleton
 import app.earful.ui.components.pressable
+import app.earful.ui.components.blockTouches
 import app.earful.ui.home.Message
 import app.earful.ui.theme.LocalPalette
 import app.earful.ui.theme.Motion
@@ -175,7 +176,8 @@ fun SearchScreen(
         if (recent.isEmpty() && clearingOn) { clearingOn = false; clearing.snapTo(0f) }
     }
 
-    Box(Modifier.fillMaxSize()) {
+    // Search covers Home: touches anywhere on it stay here, never reaching the videos behind.
+    Box(Modifier.fillMaxSize().blockTouches()) {
         // Search's own background rises over Home, which goes under.
         Box(Modifier.fillMaxSize().graphicsLayer { alpha = motion.bg.value }.background(p.bg))
         Column(Modifier.fillMaxSize().padding(top = statusTop)) {

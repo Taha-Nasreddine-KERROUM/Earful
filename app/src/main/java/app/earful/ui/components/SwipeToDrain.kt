@@ -191,3 +191,11 @@ fun SwipeToDrain(
         ) { content() }
     }
 }
+
+/**
+ * Makes this surface catch every touch that lands on it (its own buttons still work), so a tap on
+ * an empty part of a bar or a screen never reaches whatever is behind it.
+ */
+fun Modifier.blockTouches(): Modifier = pointerInput(Unit) {
+    awaitPointerEventScope { while (true) awaitPointerEvent() }
+}

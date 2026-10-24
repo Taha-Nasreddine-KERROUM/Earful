@@ -70,6 +70,7 @@ import app.earful.ui.components.Icons
 import app.earful.ui.components.Text
 import app.earful.ui.components.VideoCard
 import app.earful.ui.components.pressable
+import app.earful.ui.components.blockTouches
 import app.earful.ui.theme.LocalPalette
 import app.earful.ui.theme.Type
 
@@ -212,6 +213,7 @@ fun HomeScreen(
                 .fillMaxWidth()
                 .onSizeChanged { barHeightPx = it.height.toFloat() }
                 .graphicsLayer { translationY = barOffset }
+                .blockTouches() // taps on the bar never fall through to a video under it
                 .background(p.bg.copy(alpha = 0.96f))
                 .padding(top = statusTop)
                 .height(56.dp)
