@@ -3,6 +3,7 @@ package app.earful.ui.player
 import android.content.Context
 import android.os.Build
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -41,19 +42,24 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
@@ -77,6 +83,7 @@ import app.earful.playback.AudioCache
 import app.earful.playback.NowPlaying
 import app.earful.playback.PlaybackEvents
 import app.earful.playback.PlayerConnection
+import app.earful.ui.components.EdgeTide
 import app.earful.ui.components.Haptics
 import app.earful.ui.components.Icon
 import app.earful.ui.components.Icons
@@ -84,29 +91,293 @@ import app.earful.ui.components.RemoteImage
 import app.earful.ui.components.SaveButton
 import app.earful.ui.components.SkipIcon
 import app.earful.ui.components.Text
+import app.earful.ui.components.TideShape
+import app.earful.ui.components.Water
 import app.earful.ui.theme.LocalPalette
 import app.earful.ui.theme.Motion
 import app.earful.ui.theme.Type
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.ceil
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
+import kotlin.math.tanh
+import kotlin.random.Random
 
-/** 0 = mini player docked at the bottom, 1 = full Now Playing. [dismiss] slides the mini away. */
+/** 0 = mini player docked at the bottom, 1 = full Now Playing. */
 @Stable
 class SheetState {
     val progress = Animatable(0f)
+    /** px the mini player is pulled down, or sinking, below its place. */
     val dismiss = Animatable(0f)
     /** 0..1 — the "Up next" panel over Now Playing. */
     val queue = Animatable(0f)
+    /** The water the player moves through: heavy contents, the landing dip, the tide on its edge. */
+    val water = SheetWater()
+    /** Up next's rows floating up when it opens, sinking when it closes. */
+    val queueRows = QueueRowsMotion()
     val isExpanded get() = progress.targetValue > 0.5f
     val isQueueOpen get() = queue.targetValue > 0.5f
-    suspend fun expand(velocity: Float = 0f) = progress.animateTo(1f, Motion.sheet(), velocity)
+
+    /** Rises like a calm tide. Opened from the mini player, the picture, title and controls float up after it. */
+    suspend fun expand(velocity: Float = 0f) {
+        water.opening(fromRest = progress.value < 0.05f && !progress.isRunning)
+        progress.animateTo(1f, Motion.tide(), velocity)
+    }
+
+    /** Comes down like heavy water, and dips a little into the tab bar where it lands. */
     suspend fun collapse(velocity: Float = 0f) {
         queue.snapTo(0f)
-        progress.animateTo(0f, Motion.sheet(), velocity)
+        queueRows.reset()
+        water.closing(progress.value)
+        progress.animateTo(0f, Motion.heavy(), velocity)
     }
-    suspend fun openQueue(velocity: Float = 0f) = queue.animateTo(1f, Motion.sheet(), velocity)
-    suspend fun closeQueue(velocity: Float = 0f) = queue.animateTo(0f, Motion.sheet(), velocity)
+
+    /** Up next rises like a calm tide; opened with a tap, its rows float up one after another. */
+    suspend fun openQueue(velocity: Float = 0f, tapped: Boolean = false) = coroutineScope {
+        queueRows.reset()
+        if (tapped && queue.value < 0.05f) {
+            queueRows.enter()
+            launch { delay(700); queueRows.entered() }
+        }
+        queue.animateTo(1f, Motion.tide(), velocity)
+    }
+
+    /** Up next drains back down; closed with a tap, its rows sink first. */
+    suspend fun closeQueue(velocity: Float = 0f, tapped: Boolean = false) {
+        coroutineScope {
+            if (tapped && queue.value > 0.5f) {
+                launch { queueRows.sink() }
+                delay(60)
+            }
+            queue.animateTo(0f, Motion.drain(), velocity)
+        }
+        queueRows.reset()
+    }
+}
+
+/**
+ * The water the player moves through. Everything is in px and runs only while something moves.
+ *
+ *  · Heavy water: while you drag the player or it minimises, the picture, title and controls hang
+ *    a moment behind it (a slow spring that chases the sheet), but never outside it: the smaller it
+ *    gets, the less they may trail.
+ *  · The landing: when the mini player touches the tab bar it doesn't stop dead. It keeps going a
+ *    little way down into the water with everything in it, then floats back up.
+ *  · The tide: while it rises, the water climbs its side edges and ripples along its top.
+ *  · Opened from the mini player, the picture, title and controls float up one after another.
+ */
+@Stable
+class SheetWater {
+    var unit = 1f
+    /** px between the mini player and fully open. */
+    var range = 1f
+    /** Where the sheet's top edge is for a progress (without the dip). */
+    var topOf: (Float) -> Float = { 0f }
+    /** The mini player has just touched the tab bar; the argument is how hard (dp/s). */
+    var onLand: (Float) -> Unit = {}
+
+    /** A finger (or the back gesture) is moving the sheet. */
+    var dragging by mutableStateOf(false)
+        private set
+    /** Changes on every frame the water moves: read it to redraw with the water. */
+    var frame by mutableLongStateOf(0L)
+        private set
+    private var wake by mutableIntStateOf(0)
+
+    // heavy water: the slow spring the contents hang from
+    private var heavy = false
+    private var synced = false
+    private var fy = 0f
+    private var fv = 0f
+
+    // the landing: the bar's dip into the tab bar, and the contents settling inside it
+    var dip = 0f
+        private set
+    private var dipV = 0f
+    private var dipOn = false
+    private var pulseT = -1f
+    private var pulseA = 0f
+    private var co = 0f
+    private var coV = 0f
+    private var coOn = false
+    private var armed = false
+
+    /** The tide on the sheet's top edge. */
+    val edge = EdgeTide()
+
+    // picture, title and controls floating up (px below their place)
+    private val flX = FloatArray(3)
+    private val flV = FloatArray(3)
+    private val flD = FloatArray(3)
+    private val flOn = BooleanArray(3)
+
+    /** 0 = picture, 1 = title, 2 = controls. */
+    fun float(i: Int) = flX[i]
+
+    /** How far the contents sit from their place in the sheet (px, + = lower). */
+    fun contentOffset(q: Float): Float {
+        val lim = (6f + 40f * q) * unit
+        var o = if (heavy && synced) lim * tanh((fy - (topOf(q) + dip)) / lim) else 0f
+        if (coOn) o = (o + co).coerceIn(-lim - 3f * unit, lim + 3f * unit)
+        return o
+    }
+
+    internal fun opening(fromRest: Boolean) {
+        armed = false
+        if (fromRest) {
+            val top = topOf(0f) + dip
+            if (!heavy || (abs(fy - top) < unit && abs(fv) < 5f * unit)) heavy = false
+            val delays = floatArrayOf(0.1f, 0.16f, 0.22f)
+            for (k in 0..2) { flX[k] = 30f * unit; flV[k] = 0f; flD[k] = delays[k]; flOn[k] = true }
+        } else settleFloats()
+        wake++
+    }
+
+    internal fun closing(from: Float) {
+        if (!heavy) { heavy = true; synced = false }
+        armed = from > 0f
+        wake++
+    }
+
+    fun dragStart() {
+        dragging = true
+        if (!heavy) { heavy = true; synced = false }
+        armed = false
+        settleFloats()
+        wake++
+    }
+
+    fun dragEnd() { dragging = false; wake++ }
+
+    private fun settleFloats() {
+        for (k in 0..2) if (!flOn[k] && abs(flX[k]) > 0.1f * unit) { flOn[k] = true; flD[k] = 0f }
+    }
+
+    private fun calm(progress: Animatable<Float, AnimationVector1D>): Boolean {
+        if (progress.isRunning || dragging || dipOn || coOn || pulseT >= 0f) return false
+        if (flOn.any { it } || edge.curl != 0f || edge.rip != 0f) return false
+        if (heavy && synced) {
+            val top = topOf(progress.value.coerceIn(0f, 1f)) + dip
+            if (abs(fy - top) > 0.3f * unit || abs(fv) > 0.5f * unit) return false
+        }
+        return true
+    }
+
+    suspend fun run(progress: Animatable<Float, AnimationVector1D>) {
+        while (true) {
+            if (calm(progress)) snapshotFlow { Triple(progress.value, progress.isRunning, dragging) to wake }.first { !calm(progress) }
+            var last = 0L
+            var lastP = progress.value
+            while (!calm(progress)) {
+                withFrameNanos { now ->
+                    val dt = if (last == 0L) 0f else ((now - last) / 1e9f).coerceIn(0f, 0.05f)
+                    last = now
+                    val p = progress.value
+                    val pv = if (dt > 0f) (p - lastP) / dt else 0f
+                    lastP = p
+                    step(dt, p, pv, progress.isRunning, progress.targetValue)
+                    frame = now
+                }
+            }
+            frame += 1
+        }
+    }
+
+    private fun step(dt: Float, p: Float, pv: Float, running: Boolean, target: Float) {
+        val q = p.coerceIn(0f, 1f)
+        val n = max(1, ceil(dt / 0.004f).toInt())
+        val h = dt / n
+
+        // the first touch on the tab bar
+        if (armed && target == 0f && p <= 0.015f && pv <= 0.05f) { armed = false; touch(q) }
+
+        // the dip, and the contents settling inside the bar
+        if (dipOn || coOn) {
+            for (i in 0 until n) {
+                var acc = 0f
+                if (dipOn) {
+                    var push = 0f
+                    if (pulseT >= 0f) {
+                        val u = pulseT / PULSE
+                        if (u < 1f) { val s = sin(PI.toFloat() * u); push = pulseA * s * s }
+                        pulseT += h
+                        if (pulseT >= PULSE) pulseT = -1f
+                    }
+                    acc = -DIP_K * dip - 2f * DIP_Z * sqrt(DIP_K) * dipV + push
+                    dipV += acc * h
+                    dip += dipV * h
+                }
+                if (coOn) {
+                    coV += (-CO_K * co - 2f * CO_Z * sqrt(CO_K) * coV - CO_INERTIA * acc) * h
+                    co += coV * h
+                }
+            }
+            if (dipOn && pulseT < 0f && abs(dip) < 0.05f * unit && abs(dipV) < unit) { dip = 0f; dipV = 0f; dipOn = false }
+            if (coOn && abs(co) < 0.05f * unit && abs(coV) < unit) { co = 0f; coV = 0f; coOn = false }
+        }
+
+        // heavy water
+        val top = topOf(q) + dip
+        if (heavy) {
+            if (!synced) { fy = top; fv = 0f; synced = true }
+            for (i in 0 until n) {
+                fv += (-110f * (fy - top) - 2f * 0.5f * sqrt(110f) * fv) * h
+                fy += fv * h
+            }
+            if (!running && !dragging && abs(fy - top) < 0.3f * unit && abs(fv) < 0.5f * unit) { fy = top; fv = 0f }
+        } else { fy = top; fv = 0f; synced = true }
+
+        // floating up into place
+        for (k in 0..2) {
+            if (!flOn[k]) continue
+            if (flD[k] > 0f) { flD[k] -= dt; continue }
+            for (i in 0 until n) {
+                flV[k] += (-160f * flX[k] - 2f * 0.55f * sqrt(160f) * flV[k]) * h
+                flX[k] += flV[k] * h
+            }
+            if (abs(flX[k]) < 0.1f * unit && abs(flV[k]) < 0.4f * unit) { flX[k] = 0f; flV[k] = 0f; flOn[k] = false }
+        }
+
+        // the tide: only while it rises
+        val rising = if (dragging) pv > 0.25f else (running && target == 1f)
+        val lift = if (rising) (4f + (abs(pv) * range / unit * 0.006f).coerceAtMost(5f)) * unit else 0f
+        val stir = if (rising) 1.5f * unit * min(1f, abs(pv) * 0.8f) else 0f
+        edge.step(dt, lift, stir, unit)
+    }
+
+    private fun touch(q: Float) {
+        val top = topOf(q) + dip
+        val lim = (6f + 40f * q) * unit
+        val o = if (heavy && synced) lim * tanh((fy - top) / lim) else 0f
+        // how hard the contents push it in depends on how fast they arrive
+        val push = (70f + 0.09f * max(0f, fv / unit)).coerceIn(70f, 240f)
+        pulseT = 0f
+        pulseA = 2f * push * unit / PULSE
+        dipOn = true
+        // the contents stop hanging from the follower and settle into the bar from where they are
+        co = o + if (coOn) co else 0f
+        coV = 0f
+        coOn = true
+        heavy = false
+        onLand(push)
+    }
+
+    private companion object {
+        const val PULSE = 0.08f
+        const val DIP_K = 150f
+        const val DIP_Z = 0.5f
+        const val CO_K = 170f
+        const val CO_Z = 0.5f
+        const val CO_INERTIA = 0.02f
+    }
 }
 
 private val MiniHeight = 64.dp
@@ -124,6 +395,8 @@ fun PlayerSheet(
     conn: PlayerConnection,
     sheet: SheetState,
     bottomBarHeight: Dp,
+    water: Water,
+    tabBarShown: Boolean,
     onClosed: () -> Unit,
 ) {
     val density = LocalDensity.current
@@ -157,6 +430,9 @@ fun PlayerSheet(
         }
     }
 
+    // The water runs only while something moves.
+    LaunchedEffect(sheet) { sheet.water.run(sheet.progress) }
+
     // Artwork breathes: full size while playing, settles back when paused.
     val artScale by animateFloatAsState(if (np.playing || np.waiting) 1f else 0.86f, Motion.lively(), label = "art")
 
@@ -168,6 +444,7 @@ fun PlayerSheet(
         val H = constraints.maxHeight.toFloat()
         val landscape = W > H * 1.1f
         fun Dp.px() = with(density) { toPx() }
+        val unit = density.density
 
         var controlsH by remember { mutableFloatStateOf(340.dp.px()) }
         val miniH = MiniHeight.px()
@@ -175,14 +452,32 @@ fun PlayerSheet(
         val collapsedTop = H - bottomBarHeight.px() - margin - miniH
         val dragRange = collapsedTop.coerceAtLeast(1f)
 
-        val p = sheet.progress.value.coerceIn(0f, 1f)
-        val d = sheet.dismiss.value
+        val w = sheet.water
+        w.unit = unit
+        w.range = dragRange
+        w.topOf = { q -> lerp(collapsedTop, 0f, q) + sheet.dismiss.value }
+        w.onLand = { push ->
+            // The tab bar's surface ripples where the mini player lands on it.
+            if (tabBarShown) water.ripple(W / 2, (2.5f + push / 60f).coerceIn(3f, 7f) * unit, 70f * unit, 11f * unit, 1.1f)
+        }
+        @Suppress("UNUSED_VARIABLE") val frame = w.frame // redraw with the water
 
-        val sheetTop = lerp(collapsedTop, 0f, p) + d * (miniH + margin * 2 + bottomBarHeight.px())
+        val p = sheet.progress.value.coerceIn(0f, 1f)
+        val pulled = sheet.dismiss.value
+
+        val sheetTop = lerp(collapsedTop, 0f, p) + pulled + w.dip
         val sheetH = lerp(miniH, H, p)
         val sideMargin = lerp(margin, 0f, p)
         val sheetW = W - sideMargin * 2
-        val corner = with(density) { lerp(14.dp.toPx(), 0f, p).toDp() }
+        val corner = lerp(14.dp.px(), 0f, p)
+        // contents trailing (heavy water) or settling after the landing; picture, title and controls floating up
+        val held = w.contentOffset(p)
+        // The tide on the top edge, only once it's clearly growing.
+        val tideA = min(1f, p * 4f)
+        val curl = w.edge.curl * tideA
+        val rip = w.edge.rip * tideA
+        val sheetShape = if (curl > 0.3f || rip > 0.3f) TideShape(corner, curl, rip, w.edge.phase, unit)
+            else RoundedCornerShape(corner)
 
         // ----- artwork rectangles (relative to the sheet) ---------------------------------------
         val miniArtH = MiniArtH.px()
@@ -193,12 +488,12 @@ fun PlayerSheet(
             val regionTop = statusTop.px() + 40.dp.px()
             val regionBottom = H - controlsH - 12.dp.px()
             val region = (regionBottom - regionTop).coerceAtLeast(120.dp.px())
-            val w = minOf(W - 48.dp.px(), region * 16f / 9f)
-            val h = w * 9f / 16f
-            Rect((W - w) / 2, regionTop + (region - h) * 0.42f, w, h) // optical centre sits a bit high
+            val aw = minOf(W - 48.dp.px(), region * 16f / 9f)
+            val ah = aw * 9f / 16f
+            Rect((W - aw) / 2, regionTop + (region - ah) * 0.42f, aw, ah) // optical centre sits a bit high
         } else {
-            val h = minOf(H - statusTop.px() - navBottom.px() - 64.dp.px(), W * 0.46f * 9f / 16f)
-            Rect(32.dp.px(), (H - h) / 2, h * 16f / 9f, h)
+            val ah = minOf(H - statusTop.px() - navBottom.px() - 64.dp.px(), W * 0.46f * 9f / 16f)
+            Rect(32.dp.px(), (H - ah) / 2, ah * 16f / 9f, ah)
         }
         val art = miniArt.lerpTo(fullArt, p)
 
@@ -209,6 +504,25 @@ fun PlayerSheet(
         // (moving) sheet, so we add this back to get stable screen coordinates while dragging.
         val placedTop = remember { floatArrayOf(0f) }
 
+        // Closing the video: it lifts a little, then sinks under the tab bar, which ripples.
+        // One time in twelve, the water throws up a crown of drops.
+        fun sink() = scope.launch {
+            val start = sheet.dismiss.value
+            sheet.dismiss.animateTo(start - 6f * unit, tween(140, easing = Motion.outCubic))
+            val lucky = Random.nextInt(12) == 0
+            var touched = false
+            sheet.dismiss.animateTo(start - 6f * unit + miniH + margin + 20f * unit, tween(500, easing = Motion.inCubic)) {
+                if (!touched && value > margin + 6f * unit) {
+                    touched = true
+                    if (tabBarShown) {
+                        water.ripple(W / 2, 9f * unit, 90f * unit, 11f * unit, 1.3f)
+                        if (lucky) water.splash(sideMargin, W - sideMargin, unit)
+                    }
+                }
+            }
+            onClosed()
+        }
+
         Box(
             Modifier
                 .layout { m, _ ->
@@ -218,9 +532,10 @@ fun PlayerSheet(
                         pl.place(sideMargin.roundToInt(), sheetTop.roundToInt())
                     }
                 }
-                .graphicsLayer { alpha = 1f - d }
-                .shadow(lerp(12f, 0f, p).dp, RoundedCornerShape(corner), clip = false)
-                .clip(RoundedCornerShape(corner))
+                // Sunk below its place it's under the tab bar already; without one, it fades out there.
+                .graphicsLayer { alpha = 1f - ((pulled - miniH - margin) / (20f * unit)).coerceIn(0f, 1f) }
+                .shadow(lerp(12f, 0f, p).dp, RoundedCornerShape(with(density) { corner.toDp() }), clip = false)
+                .graphicsLayer { shape = sheetShape; clip = true }
                 .pointerInput(hasQueue, W) {
                     if (!hasQueue) return@pointerInput
                     val tracker = VelocityTracker()
@@ -258,7 +573,7 @@ fun PlayerSheet(
                             val allowed = (raw < 0f && canNext()) || (raw > 0f && canPrev())
                             // Nothing that way: it moves a little, then resists (rubber band).
                             val next = if (allowed) raw else swipe.value + dx * 0.25f
-                            val past = allowed && kotlin.math.abs(next) > commit
+                            val past = allowed && abs(next) > commit
                             if (past != crossed) { crossed = past; if (past) Haptics.threshold(view) }
                             scope.launch { swipe.snapTo(next) }
                         }
@@ -275,6 +590,7 @@ fun PlayerSheet(
                         var dismissMode = false
                         var queueMode = false
                         var crossed = false
+                        var pull = 0f // how far the finger has pulled the mini player down (px)
                         val startQ = sheet.queue.value
                         val afterSlop = awaitVerticalTouchSlopOrCancellation(down.id) { change, over ->
                             change.consume()
@@ -285,14 +601,19 @@ fun PlayerSheet(
                             val queueNow = conn.queue.value.entries.size > 1
                             queueMode = startP > 0.98f && (startQ > 0.01f || (over < 0 && queueNow))
                         } ?: return@awaitEachGesture
+                        if (!dismissMode && !queueMode) sheet.water.dragStart()
+                        val keep = 60.dp.toPx()
+                        val closeAt = 26.dp.toPx()
                         fun apply(dy: Float) {
                             if (queueMode) {
                                 scope.launch { sheet.queue.snapTo((sheet.queue.value - dy / queueRange).coerceIn(0f, 1f)) }
                             } else if (dismissMode) {
-                                val nd = (sheet.dismiss.value + dy / (miniH * 1.8f)).coerceIn(0f, 1f)
-                                if (!crossed && nd > 0.3f) { crossed = true; Haptics.threshold(view) }
-                                if (crossed && nd < 0.25f) crossed = false
-                                scope.launch { sheet.dismiss.snapTo(nd) }
+                                // Follows the finger, then gets heavier past 60 dp.
+                                pull = (pull + dy).coerceAtLeast(0f)
+                                val shown = if (pull <= keep) pull else keep + (pull - keep) * 0.3f
+                                if (!crossed && shown > closeAt) { crossed = true; Haptics.threshold(view) }
+                                if (crossed && shown < closeAt * 0.8f) crossed = false
+                                scope.launch { sheet.dismiss.snapTo(shown) }
                             } else {
                                 scope.launch { sheet.progress.snapTo((sheet.progress.value - dy / dragRange).coerceIn(0f, 1f)) }
                             }
@@ -310,6 +631,7 @@ fun PlayerSheet(
                             change.consume()
                         }
                         val vy = velocity.calculateVelocity().y
+                        if (!dismissMode && !queueMode) sheet.water.dragEnd()
                         scope.launch {
                             if (queueMode) {
                                 val flick = 220.dp.toPx()
@@ -322,21 +644,19 @@ fun PlayerSheet(
                                 }
                                 if (open) sheet.openQueue(-vy / queueRange) else sheet.closeQueue(-vy / queueRange)
                             } else if (dismissMode) {
-                                if (sheet.dismiss.value > 0.3f || vy > 450.dp.toPx()) {
-                                    sheet.dismiss.animateTo(1f, tween(180))
-                                    onClosed()
-                                } else sheet.dismiss.animateTo(0f, Motion.sheet())
+                                if (sheet.dismiss.value > closeAt || vy > 450.dp.toPx()) sink()
+                                else sheet.dismiss.animateTo(0f, Motion.snapBack())
                             } else {
                                 val v = -vy / dragRange
                                 // Light flick or a short pull is enough: commit after ~18% of the
                                 // travel in the direction you started, instead of half the screen.
                                 val flick = 220.dp.toPx()
-                                val p = sheet.progress.value
+                                val pp = sheet.progress.value
                                 val open = when {
                                     vy > flick -> false
                                     vy < -flick -> true
-                                    startP > 0.5f -> p > 0.82f
-                                    else -> p > 0.18f
+                                    startP > 0.5f -> pp > 0.82f
+                                    else -> pp > 0.18f
                                 }
                                 if (open) sheet.expand(v) else sheet.collapse(v)
                             }
@@ -356,102 +676,126 @@ fun PlayerSheet(
                     textStart = with(density) { (miniArt.x + miniArt.w).toDp() } + 12.dp,
                     progress = if (np.durationMs > 0) pos.toFloat() / np.durationMs else 0f,
                     modifier = Modifier.fillMaxWidth().height(MiniHeight)
-                        .graphicsLayer { alpha = (1f - p / 0.25f).coerceIn(0f, 1f) },
+                        .graphicsLayer {
+                            alpha = (1f - p / 0.25f).coerceIn(0f, 1f)
+                            translationY = held * 0.5f
+                        },
                     onExpand = { scope.launch { sheet.expand() } },
                     swipeX = { swipe.value },
                 )
             }
 
-            // Layer 4 — Now Playing content
-            if (p > 0.2f) {
-                val a = ((p - 0.35f) / 0.65f).coerceIn(0f, 1f)
-                Box(
-                    Modifier.fillMaxSize().graphicsLayer {
-                        alpha = a; translationY = (1f - a) * 48.dp.toPx()
+            // Layers 4 and 5 sink back a little, softened, while Up next is over them.
+            val qOpen = sheet.queue.value
+            Box(
+                Modifier.fillMaxSize().graphicsLayer {
+                    if (qOpen > 0.001f) {
+                        val s = 1f - 0.03f * qOpen
+                        scaleX = s; scaleY = s
+                        if (Build.VERSION.SDK_INT >= 31) {
+                            val r = 4.dp.toPx() * qOpen
+                            renderEffect = if (r > 0.5f) BlurEffect(r, r, TileMode.Clamp) else null
+                        }
                     }
-                ) {
-                    // Grabber: says "this pulls down" without words.
+                }
+            ) {
+                // Layer 4 — Now Playing content
+                if (p > 0.2f) {
+                    val a = ((p - 0.35f) / 0.65f).coerceIn(0f, 1f)
                     Box(
-                        Modifier.align(Alignment.TopCenter).padding(top = statusTop + 10.dp)
-                            .size(56.dp, 24.dp)
-                            .clickable(remember { MutableInteractionSource() }, null, onClickLabel = "Minimize") {
-                                scope.launch { sheet.collapse() }
-                            },
-                        contentAlignment = Alignment.Center,
+                        Modifier.fillMaxSize().graphicsLayer {
+                            alpha = a; translationY = (1f - a) * 48.dp.toPx() + held * 0.75f
+                        }
                     ) {
-                        Box(Modifier.size(38.dp, 5.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.35f)))
+                        // Grabber: says "this pulls down" without words.
+                        Box(
+                            Modifier.align(Alignment.TopCenter).padding(top = statusTop + 10.dp)
+                                .size(56.dp, 24.dp)
+                                .clickable(remember { MutableInteractionSource() }, null, onClickLabel = "Minimize") {
+                                    scope.launch { sheet.collapse() }
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(Modifier.size(38.dp, 5.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.35f)))
+                        }
+                        val controlsMod = if (!landscape) {
+                            Modifier.align(Alignment.BottomCenter).fillMaxWidth()
+                                .onSizeChanged { controlsH = it.height.toFloat() }
+                                .padding(bottom = navBottom + 20.dp, start = 28.dp, end = 28.dp)
+                        } else {
+                            Modifier.fillMaxSize().padding(
+                                start = with(density) { (fullArt.x + fullArt.w).toDp() } + 36.dp,
+                                end = 32.dp, top = statusTop + 24.dp, bottom = navBottom + 16.dp,
+                            ).wrapContentHeight(Alignment.CenterVertically)
+                        }
+                        NowPlayingControls(
+                            np = np, conn = conn, positionMs = pos, downloaded = downloaded,
+                            error = error, saved = saved, onToggleSave = { Library.toggleSaved(np.video) },
+                            upcoming = queue.upcoming,
+                            showUpNext = hasQueue,
+                            onOpenQueue = { scope.launch { sheet.openQueue(tapped = true) } },
+                            titleShift = { w.float(1) },
+                            controlsShift = { w.float(2) },
+                            queueOpen = { sheet.queue.value },
+                            modifier = controlsMod,
+                        )
                     }
-                    val controlsMod = if (!landscape) {
-                        Modifier.align(Alignment.BottomCenter).fillMaxWidth()
-                            .onSizeChanged { controlsH = it.height.toFloat() }
-                            .padding(bottom = navBottom + 20.dp, start = 28.dp, end = 28.dp)
-                    } else {
-                        Modifier.fillMaxSize().padding(
-                            start = with(density) { (fullArt.x + fullArt.w).toDp() } + 36.dp,
-                            end = 32.dp, top = statusTop + 24.dp, bottom = navBottom + 16.dp,
-                        ).wrapContentHeight(Alignment.CenterVertically)
-                    }
-                    NowPlayingControls(
-                        np = np, conn = conn, positionMs = pos, downloaded = downloaded,
-                        error = error, saved = saved, onToggleSave = { Library.toggleSaved(np.video) },
-                        upcoming = queue.upcoming,
-                        showUpNext = hasQueue,
-                        onOpenQueue = { scope.launch { sheet.openQueue() } },
-                        modifier = controlsMod,
+                }
+
+                // Layer 5 — the artwork, travelling between both layouts
+                val artCorner = with(density) { lerp(6.dp.toPx(), 12.dp.toPx(), p).toDp() }
+                val scale = lerp(1f, artScale, p)
+                val artFloat = w.float(0) * (p * 2f).coerceIn(0f, 1f)
+                Box(
+                    Modifier
+                        .layout { m, _ ->
+                            val pl = m.measure(Constraints.fixed(art.w.roundToInt(), art.h.roundToInt()))
+                            layout(pl.width, pl.height) { pl.place(art.x.roundToInt(), art.y.roundToInt()) }
+                        }
+                        .graphicsLayer {
+                            scaleX = scale; scaleY = scale
+                            translationX = swipe.value
+                            translationY = held + artFloat
+                            alpha = 1f - (abs(swipe.value) / W * 0.7f).coerceIn(0f, 0.7f)
+                            shadowElevation = lerp(0f, 22.dp.toPx(), p) * scale
+                            shape = RoundedCornerShape(artCorner)
+                            clip = true
+                            ambientShadowColor = Color.Black; spotShadowColor = Color.Black
+                        }
+                        .background(Color(0xFF2C2C2E))
+                ) {
+                    RemoteImage(np.video.thumbnail, Modifier.fillMaxSize())
+                    ArtworkGestures(
+                        enabled = p > 0.99f,
+                        playing = np.playing,
+                        onSeek = { s -> conn.seekBy(s * 1000L) },
+                        onToggle = { conn.togglePlay() },
+                        modifier = Modifier.fillMaxSize(),
+                        showHint = hintPending && p > 0.99f,
+                        onHintShown = { hintPending = false; ctx.prefs().edit().putBoolean("hint_zones", true).apply() },
                     )
                 }
             }
 
-            // Layer 5 — the artwork, travelling between both layouts
-            val artCorner = with(density) { lerp(6.dp.toPx(), 12.dp.toPx(), p).toDp() }
-            val scale = lerp(1f, artScale, p)
-            Box(
-                Modifier
-                    .layout { m, _ ->
-                        val pl = m.measure(Constraints.fixed(art.w.roundToInt(), art.h.roundToInt()))
-                        layout(pl.width, pl.height) { pl.place(art.x.roundToInt(), art.y.roundToInt()) }
-                    }
-                    .graphicsLayer {
-                        scaleX = scale; scaleY = scale
-                        translationX = swipe.value
-                        alpha = 1f - (kotlin.math.abs(swipe.value) / W * 0.7f).coerceIn(0f, 0.7f)
-                        shadowElevation = lerp(0f, 22.dp.toPx(), p) * scale
-                        shape = RoundedCornerShape(artCorner)
-                        clip = true
-                        ambientShadowColor = Color.Black; spotShadowColor = Color.Black
-                    }
-                    .background(Color(0xFF2C2C2E))
-            ) {
-                RemoteImage(np.video.thumbnail, Modifier.fillMaxSize())
-                ArtworkGestures(
-                    enabled = p > 0.99f,
-                    playing = np.playing,
-                    onSeek = { s -> conn.seekBy(s * 1000L) },
-                    onToggle = { conn.togglePlay() },
-                    modifier = Modifier.fillMaxSize(),
-                    showHint = hintPending && p > 0.99f,
-                    onHintShown = { hintPending = false; ctx.prefs().edit().putBoolean("hint_zones", true).apply() },
-                )
-            }
-
-            // Layer 6 — "Up next" queue, sliding up over everything
-            val q = sheet.queue.value
-            if (q > 0.001f && p > 0.9f && hasQueue) {
+            // Layer 6 — "Up next", rising over everything like a calm tide
+            if (qOpen > 0.001f && p > 0.9f && hasQueue) {
                 Box(
                     Modifier.fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.35f * q))
+                        .background(Color.Black.copy(alpha = 0.18f * qOpen))
                         .clickable(remember { MutableInteractionSource() }, null, onClickLabel = "Close queue") {
-                            scope.launch { sheet.closeQueue() }
+                            scope.launch { sheet.closeQueue(tapped = true) }
                         }
                 )
                 QueuePanel(
                     queue = queue,
                     open = sheet.queue,
+                    rows = sheet.queueRows,
                     panelHeight = queuePanelH,
                     navBottom = navBottom,
                     downloads = downloads,
                     onJump = { conn.jumpTo(it) },
                     onRemove = { conn.remove(it) },
+                    onClose = { scope.launch { sheet.closeQueue(tapped = true) } },
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
             }
@@ -476,7 +820,7 @@ private fun MiniContent(
                 .graphicsLayer {
                     // Title slides with the artwork when swiping to the next/previous video.
                     translationX = swipeX()
-                    alpha = 1f - (kotlin.math.abs(swipeX()) / size.width * 1.4f).coerceIn(0f, 0.8f)
+                    alpha = 1f - (abs(swipeX()) / size.width * 1.4f).coerceIn(0f, 0.8f)
                 }
                 .padding(start = textStart, end = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -505,10 +849,13 @@ private fun NowPlayingControls(
     upcoming: Int,
     showUpNext: Boolean,
     onOpenQueue: () -> Unit,
+    titleShift: () -> Float,
+    controlsShift: () -> Float,
+    queueOpen: () -> Float,
     modifier: Modifier,
 ) {
     Column(modifier) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.graphicsLayer { translationY = titleShift() }, verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 12.dp)) {
                 Text(
                     np.video.title, Type.title3, color = Color.White, maxLines = 1,
@@ -521,29 +868,32 @@ private fun NowPlayingControls(
                 SaveButton(saved, onToggleSave, tint = Color.White, size = 20)
             }
         }
-        Spacer(Modifier.height(26.dp))
-        val ads by PlaybackEvents.ads.collectAsStateWithLifecycle()
-        Scrubber(positionMs, np.durationMs, downloaded, onSeek = conn::seekTo, ads = ads[np.video.id].orEmpty())
-        Spacer(Modifier.height(18.dp))
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            SkipButton(forward = false) { conn.seekBy(-10_000) }
-            CircleButton(onClick = { conn.togglePlay() }, size = 92.dp, enabled = !np.ended,
-                label = if (np.playing) "Pause" else "Play") {
-                PlayPauseGlyph(showPause = np.playing || (np.waiting && error == null), ended = np.ended, tint = Color.White, size = 56.dp)
+        Column(Modifier.graphicsLayer { translationY = controlsShift() }) {
+            Spacer(Modifier.height(26.dp))
+            val ads by PlaybackEvents.ads.collectAsStateWithLifecycle()
+            Scrubber(positionMs, np.durationMs, downloaded, onSeek = conn::seekTo, ads = ads[np.video.id].orEmpty())
+            Spacer(Modifier.height(18.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                SkipButton(forward = false) { conn.seekBy(-10_000) }
+                CircleButton(onClick = { conn.togglePlay() }, size = 92.dp, enabled = !np.ended,
+                    label = if (np.playing) "Pause" else "Play") {
+                    PlayPauseGlyph(showPause = np.playing || (np.waiting && error == null), ended = np.ended, tint = Color.White, size = 56.dp)
+                }
+                SkipButton(forward = true) { conn.seekBy(10_000) }
             }
-            SkipButton(forward = true) { conn.seekBy(10_000) }
-        }
-        Spacer(Modifier.height(20.dp))
-        StatusLine(np, downloaded, error, onRetry = { conn.retry(np.video) })
-        Spacer(Modifier.height(6.dp))
-        // Space is always reserved, so nothing shifts when the button fades in.
-        val upNextAlpha by animateFloatAsState(if (showUpNext) 1f else 0f, tween(250), label = "upnext")
-        Box(Modifier.graphicsLayer { alpha = upNextAlpha }) {
-            UpNextButton(upcoming, enabled = showUpNext, onClick = onOpenQueue)
+            Spacer(Modifier.height(20.dp))
+            StatusLine(np, downloaded, error, onRetry = { conn.retry(np.video) })
+            Spacer(Modifier.height(6.dp))
+            // Space is always reserved, so nothing shifts when the button fades in.
+            val upNextAlpha by animateFloatAsState(if (showUpNext) 1f else 0f, tween(250), label = "upnext")
+            // It fades as Up next rises out of it.
+            Box(Modifier.graphicsLayer { alpha = upNextAlpha * (1f - (queueOpen() * 3f).coerceIn(0f, 1f)) }) {
+                UpNextButton(upcoming, enabled = showUpNext, onClick = onOpenQueue)
+            }
         }
     }
 }
@@ -739,4 +1089,3 @@ private data class Rect(val x: Float, val y: Float, val w: Float, val h: Float) 
 }
 
 private fun Context.prefs() = getSharedPreferences("ui", Context.MODE_PRIVATE)
-

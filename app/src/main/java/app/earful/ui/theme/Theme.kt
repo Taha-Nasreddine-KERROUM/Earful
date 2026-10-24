@@ -1,5 +1,6 @@
 package app.earful.ui.theme
 
+import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -94,6 +95,42 @@ object Motion {
     fun <T> lively() = spring<T>(dampingRatio = 0.62f, stiffness = 260f)
     /** Taps & presses: immediate. */
     fun <T> snappy() = spring<T>(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = 1400f)
+
+    // ----- water ---------------------------------------------------------------------------------
+    /** Rising like a calm tide: smooth, almost no bounce (player opening, Up next opening). */
+    fun <T> tide() = spring<T>(dampingRatio = 0.8f, stiffness = 190f)
+    /** Coming down like heavy water: quicker, with the contents trailing behind (player minimising). */
+    fun <T> heavy() = spring<T>(dampingRatio = 0.86f, stiffness = 300f)
+    /** Draining back down (Up next closing). */
+    fun <T> drain() = spring<T>(dampingRatio = 0.88f, stiffness = 240f)
+    /** Things floating up into place with one gentle bob (rows, titles, the picture). */
+    fun <T> floatUp() = spring<T>(dampingRatio = 0.55f, stiffness = 160f)
+    /** A tab icon coming back up to the surface. */
+    fun <T> resurface() = spring<T>(dampingRatio = 0.62f, stiffness = 200f)
+    /** Rows gliding up calmly into a gap left by something that went under. */
+    fun <T> glide() = spring<T>(dampingRatio = 0.62f, stiffness = 170f)
+    /** The search field spreading out of the magnifier, and shrinking back into it. */
+    fun <T> spread() = spring<T>(dampingRatio = 0.82f, stiffness = 260f)
+    fun <T> gather() = spring<T>(dampingRatio = 0.9f, stiffness = 300f)
+    /** A pop that settles with a little jiggle (the bookmark filling, the clear button). */
+    fun <T> pop() = spring<T>(dampingRatio = 0.3f, stiffness = 380f)
+    /** Liquid filling a glass: quick, with one slosh. */
+    fun <T> fill() = spring<T>(dampingRatio = 0.5f, stiffness = 150f)
+    /** A bead of water swelling under the finger, and wobbling flat afterwards. */
+    fun <T> swell() = spring<T>(dampingRatio = 0.5f, stiffness = 300f)
+    fun <T> wobble() = spring<T>(dampingRatio = 0.22f, stiffness = 260f)
+    /** Let go too early: back into place with a small bounce. */
+    fun <T> snapBack() = spring<T>(dampingRatio = 0.6f, stiffness = 400f)
+    /** The tab bar bobbing once as it comes back up to the surface. */
+    fun <T> barBob() = spring<T>(dampingRatio = 0.5f, stiffness = 320f)
+    /** A tapped button popping back to size. */
+    fun <T> tapPop() = spring<T>(dampingRatio = 0.5f, stiffness = 500f)
+    fun <T> rowBack() = spring<T>(dampingRatio = 0.62f, stiffness = 380f)
+
+    /** Speeding up (sinking), slowing down (surfacing), and both. Cubic, like the design previews. */
+    val inCubic = CubicBezierEasing(0.32f, 0f, 0.67f, 0f)
+    val outCubic = CubicBezierEasing(0.33f, 1f, 0.68f, 1f)
+    val inOutCubic = CubicBezierEasing(0.65f, 0f, 0.35f, 1f)
 }
 
 @Composable
