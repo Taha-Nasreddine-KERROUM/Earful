@@ -152,7 +152,8 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     fun play(v: Video) {
         keyboard?.hide()
         conn.play(v)
-        scope.launch { sheet.dismiss.snapTo(0f); sheet.expand() }
+        // Straight to the full page (the mini player only shows once you minimise it).
+        scope.launch { sheet.dismiss.snapTo(0f); sheet.openDirect() }
     }
 
     LaunchedEffect(signals.playRequest) { signals.playRequest?.let { play(it); signals.playRequest = null } }

@@ -150,7 +150,36 @@ class SheetState {
     }
 
     /** Comes down like heavy water, and dips a little into the tab bar where it lands. */
+    /**
+     * Opened straight from a video in a list: the whole Now Playing page rises from the bottom edge
+     * (no mini player first). The mini player only appears when you minimise it.
+     */
+    var direct by mutableStateOf(false)
+        private set
+    internal var pageH = 1f
+    internal var miniTop = 1f
+
+    suspend fun openDirect() {
+        if (progress.value > 0.5f && progress.targetValue == 1f) { expand(); return }
+        direct = true
+        try {
+            progress.snapTo(0f)
+            expand()
+        } finally {
+            leaveDirect()
+        }
+    }
+
+    /** Back to the normal sheet, from the same place on screen (seamless once it's fully open). */
+    private suspend fun leaveDirect() {
+        if (!direct) return
+        val p = progress.value.coerceIn(0f, 1f)
+        direct = false
+        if (p < 1f) progress.snapTo((1f - (1f - p) * pageH / miniTop.coerceAtLeast(1f)).coerceIn(0f, 1f))
+    }
+
     suspend fun collapse(velocity: Float = 0f) {
+        leaveDirect()
         queue.snapTo(0f)
         queueRows.reset()
         water.closing(progress.value)
@@ -519,7 +548,9 @@ fun PlayerSheet(
         val w = sheet.water
         w.unit = unit
         w.range = dragRange
-        w.topOf = { q -> lerp(collapsedTop, 0f, q) + sheet.dismiss.value }
+        sheet.pageH = H
+        sheet.miniTop = collapsedTop
+        w.topOf = { q -> (if (sheet.direct) (1f - q) * H else lerp(collapsedTop, 0f, q)) + sheet.dismiss.value }
         w.onLand = { push ->
             // The tab bar's surface ripples where the mini player lands on it.
             if (tabBarShown) water.ripple(W / 2, (2.5f + push / 60f).coerceIn(3f, 7f) * unit, 70f * unit, 11f * unit, 1.1f)
@@ -529,12 +560,12 @@ fun PlayerSheet(
         // few transforms per frame instead of rebuilding the whole screen.
         fun pNow() = sheet.progress.value.coerceIn(0f, 1f)
         fun held(): Float { w.frame; return w.contentOffset(pNow()) } // contents trailing / settling
-        fun fade() = ((pNow() - 0.35f) / 0.65f).coerceIn(0f, 1f)      // Now Playing's contents
+        fun fade() = if (sheet.direct) 1f else ((pNow() - 0.35f) / 0.65f).coerceIn(0f, 1f) // Now Playing's contents
         val showChrome by remember { derivedStateOf { sheet.progress.value < 1f } }
         // Now Playing's layers are built as soon as it's about to rise (or a finger lifts it),
         // never in the middle of the movement.
         val showBackdrop by remember { derivedStateOf { sheet.progress.value > 0.001f || sheet.rising || sheet.water.dragging } }
-        val showMini by remember { derivedStateOf { sheet.progress.value < 0.3f } }
+        val showMini by remember { derivedStateOf { sheet.progress.value < 0.3f && !sheet.direct } }
         val showFull by remember { derivedStateOf { sheet.progress.value > 0.2f || sheet.rising || sheet.water.dragging } }
         val fullyOpen by remember { derivedStateOf { sheet.progress.value > 0.99f } }
         val queueShown by remember { derivedStateOf { sheet.queue.value > 0.001f && sheet.progress.value > 0.9f } }
@@ -588,9 +619,10 @@ fun PlayerSheet(
                 .layout { m, _ ->
                     val p = pNow()
                     w.frame // moves with the water (the landing dip)
-                    val top = lerp(collapsedTop, 0f, p) + sheet.dismiss.value + w.dip
-                    val side = lerp(margin, 0f, p)
-                    val pl = m.measure(Constraints.fixed((W - side * 2f).roundToInt(), lerp(miniH, H, p).roundToInt()))
+                    val direct = sheet.direct // opened from a list: a full page rising from the bottom edge
+                    val top = (if (direct) (1f - p) * H else lerp(collapsedTop, 0f, p)) + sheet.dismiss.value + w.dip
+                    val side = if (direct) 0f else lerp(margin, 0f, p)
+                    val pl = m.measure(Constraints.fixed((W - side * 2f).roundToInt(), (if (direct) H else lerp(miniH, H, p)).roundToInt()))
                     layout(pl.width, pl.height) {
                         placedTop[0] = top.roundToInt().toFloat()
                         pl.place(side.roundToInt(), top.roundToInt())
@@ -661,6 +693,7 @@ fun PlayerSheet(
                 .pointerInput(dragRange, queueRange) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
+                        if (sheet.direct) return@awaitEachGesture // still rising into place
                         fun screenY(c: androidx.compose.ui.input.pointer.PointerInputChange) = c.position.y + placedTop[0]
                         var lastY = screenY(down)
                         velocity.resetTracking()
@@ -747,7 +780,7 @@ fun PlayerSheet(
             if (showChrome) Box(Modifier.fillMaxSize().background(palette.chrome))
             // Layer 2 — blurred artwork backdrop. Laid out once at the full page's size (the sheet's
             // clip shows what fits), so its blur is made once and reused, not redone every frame.
-            if (showBackdrop) Backdrop(np.video.thumbnail, Modifier.pageSized(W, H, bottom = false).graphicsLayer { alpha = pNow() })
+            if (showBackdrop) Backdrop(np.video.thumbnail, Modifier.pageSized(W, H, bottom = false).graphicsLayer { alpha = if (sheet.direct) 1f else pNow() })
 
             // Layer 3 — mini player content
             if (showMini) {
@@ -832,17 +865,18 @@ fun PlayerSheet(
                         }
                         .graphicsLayer {
                             val p = pNow()
-                            val art = miniArt.lerpTo(fullArt, p)
-                            val breathe = lerp(1f, artScale.value, p)
+                            val pa = if (sheet.direct) 1f else p // a direct open has the picture in place already
+                            val art = miniArt.lerpTo(fullArt, pa)
+                            val breathe = lerp(1f, artScale.value, pa)
                             val s = art.w / fullArt.w * breathe
                             scaleX = s; scaleY = s // about its centre
                             translationX = art.x + art.w / 2f - (fullArt.x + fullArt.w / 2f) + swipe.value
                             translationY = art.y + art.h / 2f - (fullArt.y + fullArt.h / 2f) + held() +
                                 w.float(0) * (p * 2f).coerceIn(0f, 1f)
                             alpha = 1f - (abs(swipe.value) / W * 0.7f).coerceIn(0f, 0.7f)
-                            shadowElevation = lerp(0f, 22.dp.toPx(), p) * breathe
+                            shadowElevation = lerp(0f, 22.dp.toPx(), pa) * breathe
                             // the corner is drawn before the scaling, so it's sized up to look right after it
-                            shape = RoundedCornerShape(lerp(6.dp.toPx(), 12.dp.toPx(), p) / s.coerceAtLeast(0.05f))
+                            shape = RoundedCornerShape(lerp(6.dp.toPx(), 12.dp.toPx(), pa) / s.coerceAtLeast(0.05f))
                             clip = true
                             ambientShadowColor = Color.Black; spotShadowColor = Color.Black
                         }
