@@ -30,7 +30,6 @@ import app.earful.data.Video
 import app.earful.ui.components.Icon
 import app.earful.ui.components.Icons
 import app.earful.ui.components.Text
-import app.earful.ui.components.SwipeToDrain
 import app.earful.ui.components.VideoRow
 import app.earful.ui.theme.LocalPalette
 import app.earful.ui.theme.Type
@@ -57,14 +56,8 @@ fun SavedScreen(bottomPadding: Dp, onPlay: (Video) -> Unit, onQueue: (Video) -> 
         }
         if (saved.isEmpty()) item { Empty() }
         items(saved, key = { it.id }) { v ->
-            // Swipe right to remove it: the red floods in and drains away, like in Up next.
-            SwipeToDrain(
-                onRemove = { Library.removeSaved(v.id); onRemoved(v) },
-                background = p.bg,
-                modifier = Modifier.animateItem(),
-            ) {
-                VideoRow(v, saved = true, onOpen = { onPlay(v) }, onToggleSave = { Library.removeSaved(v.id); onRemoved(v) }, onQueue = { onQueue(v) })
-            }
+            VideoRow(v, saved = true, onOpen = { onPlay(v) }, onToggleSave = { Library.removeSaved(v.id); onRemoved(v) }, onQueue = { onQueue(v) },
+                modifier = Modifier.animateItem())
         }
     }
 }
