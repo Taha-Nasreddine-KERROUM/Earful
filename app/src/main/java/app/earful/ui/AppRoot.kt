@@ -70,6 +70,7 @@ import app.earful.ui.theme.LocalPalette
 import app.earful.ui.theme.Type
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -107,6 +108,23 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     val imeInsets = WindowInsets.ime
     @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
     val imeTarget = WindowInsets.imeAnimationTarget
+    // The mini player rides the keyboard: the moment the keyboard starts to move (Android says
+    // where it will end up), the mini player sets off along the same curve and timing Android
+    // moves the keyboard with, so the two travel as one, without waiting for the keyboard's
+    // position to be reported frame by frame (late on some phones). As it arrives it bounces,
+    // as hard as it was moving, the same as landing after a minimise.
+    val keyboardRide = remember { androidx.compose.animation.core.Animatable(0f) }
+    LaunchedEffect(imeTarget) {
+        snapshotFlow { imeTarget.getBottom(density).toFloat() }.collectLatest { target ->
+            val from = keyboardRide.value
+            if (kotlin.math.abs(target - from) < 1f) return@collectLatest
+            keyboardRide.animateTo(target, tween(280, easing = androidx.compose.animation.core.CubicBezierEasing(0.2f, 0f, 0f, 1f)))
+            val moved = target - from
+            if (kotlin.math.abs(moved) > 24f * density.density && np != null && sheet.miniShowing) {
+                sheet.water.bump(up = moved > 0f, speed = kotlin.math.abs(moved) / 0.28f)
+            }
+        }
+    }
     val tabBarHeight = 52.dp + navBottom
     val bottomBar by animateDpAsState(if (searchOpen) navBottom else tabBarHeight, label = "bar")
     val contentBottom = bottomBar + if (np != null) 72.dp else 0.dp
@@ -251,10 +269,7 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
                 np = state, conn = conn, sheet = sheet, bottomBarHeight = bottomBar,
                 water = water, tabBarShown = !searchOpen,
                 // In search, the mini player rides just above the keyboard, moving with it.
-                // (follows the keyboard all the way, also down again as search closes)
-                lift = { (imeInsets.getBottom(density) - with(density) { bottomBar.toPx() }).coerceAtLeast(0f) },
-                keyboard = { imeInsets.getBottom(density).toFloat() },
-                keyboardTarget = { imeTarget.getBottom(density).toFloat() },
+                lift = { (keyboardRide.value - with(density) { bottomBar.toPx() }).coerceAtLeast(0f) },
                 onClosed = {
                     conn.close()
                     scope.launch { sheet.progress.snapTo(0f); sheet.dismiss.snapTo(0f) }
