@@ -80,13 +80,22 @@ internal fun TabBar(
     val depth = remember { List(2) { i -> Animatable(if (i == selected.ordinal) 0f else UNDER) } }
     val lit = remember { List(2) { i -> Animatable(if (i == selected.ordinal) 1f else 0f) } }
     var tapping by remember { mutableStateOf<Job?>(null) }
+    // A page turned by tapping a tab: the bar only gets the small wave under that tab, not the
+    // stick sweeping across it (that's for swipes).
+    var tapTurn by remember { mutableStateOf<Tab?>(null) }
+    var tapDist by remember { mutableFloatStateOf(1f) }
     var width by remember { mutableFloatStateOf(0f) }
 
     // Swipes (and anything else that turns the page) carry the icons with them, and the gap
     // between the two pages runs down into the bar like a stick dipped in water (F2).
     LaunchedEffect(Unit) {
         snapshotFlow { position() }.collect { pos ->
-            if (width > 0f) {
+            tapTurn?.let {
+                // Arrived, or a finger took over and is turning it elsewhere: swipes stir it again.
+                val dist = abs(pos - it.ordinal)
+                if (dist < 0.001f || dist > tapDist + 0.002f) tapTurn = null else tapDist = dist
+            }
+            if (width > 0f && tapTurn == null) {
                 // Each page shrinks a little as it leaves (5% at most), about its own centre.
                 val half = width / 2f
                 val homeRight = -pos * width + half + half * (1f - 0.05f * pos.coerceIn(0f, 1f))
@@ -116,6 +125,8 @@ internal fun TabBar(
             }
             water.ripple(cx, 4.dp.toPx(), 40.dp.toPx(), 11.dp.toPx(), 1f)
         }
+        tapTurn = t
+        tapDist = 1f
         tapping?.cancel()
         // The dip-and-rise owns the icons from here (set before the page starts to turn).
         tapping = scope.launch {
@@ -177,39 +188,36 @@ private fun TabItem(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Box(Modifier.graphicsLayer {
-            val d = depth()
-            val s = 100f / (100f + d)
-            val deep = max(0f, d)
-            translationX = toMiddle() * (1f - s) * 0.55f
-            translationY = -(1f - s) * 14.dp.toPx()
-            scaleX = s; scaleY = s
-            alpha = 1f - (deep / 24f).coerceIn(0f, 1f) * 0.88f
-            if (Build.VERSION.SDK_INT >= 31) {
-                val r = deep * 0.065f * density
-                renderEffect = if (r > 0.3f) BlurEffect(r, r, TileMode.Decal) else null
+        // Icon and label go under (and come up) together, as one thing.
+        Column(
+            Modifier.graphicsLayer {
+                val d = depth()
+                val s = 100f / (100f + d)
+                val deep = max(0f, d)
+                translationX = toMiddle() * (1f - s) * 0.55f
+                translationY = -(1f - s) * 14.dp.toPx()
+                scaleX = s; scaleY = s
+                alpha = 1f - (deep / 24f).coerceIn(0f, 1f) * 0.88f
+                if (Build.VERSION.SDK_INT >= 31) {
+                    val r = deep * 0.065f * density
+                    renderEffect = if (r > 0.3f) BlurEffect(r, r, TileMode.Decal) else null
+                }
+            },
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box {
+                // Outline and filled icons cross-fade, so the tab "fills in" as it comes up.
+                Icon(icon, p.secondary, size = 25.dp, contentDescription = label,
+                    modifier = Modifier.graphicsLayer { alpha = 1f - lit() })
+                Icon(iconSelected, p.accent, size = 25.dp,
+                    modifier = Modifier.graphicsLayer { alpha = lit() })
             }
-        }) {
-            // Outline and filled icons cross-fade, so the tab "fills in" as it comes up.
-            Icon(icon, p.secondary, size = 25.dp, contentDescription = label,
-                modifier = Modifier.graphicsLayer { alpha = 1f - lit() })
-            Icon(iconSelected, p.accent, size = 25.dp,
-                modifier = Modifier.graphicsLayer { alpha = lit() })
-        }
-        Spacer(Modifier.height(2.dp))
-        Box(Modifier.graphicsLayer {
-            val d = depth()
-            val s = 100f / (100f + d)
-            val deep = max(0f, d)
-            translationX = toMiddle() * (1f - s) * 0.55f * 0.6f
-            translationY = -(1f - s) * 14.dp.toPx() * 0.3f
-            val ls = 1f - (1f - s) * 0.5f
-            scaleX = ls; scaleY = ls
-            alpha = 1f - (deep / 24f).coerceIn(0f, 1f) * 0.7f
-        }) {
-            val style = Type.caption.copy(fontSize = TextUnit(10.5f, TextUnitType.Sp))
-            Text(label, style, color = p.secondary, modifier = Modifier.graphicsLayer { alpha = 1f - lit() })
-            Text(label, style, color = p.accent, modifier = Modifier.graphicsLayer { alpha = lit() })
+            Spacer(Modifier.height(2.dp))
+            Box {
+                val style = Type.caption.copy(fontSize = TextUnit(10.5f, TextUnitType.Sp))
+                Text(label, style, color = p.secondary, modifier = Modifier.graphicsLayer { alpha = 1f - lit() })
+                Text(label, style, color = p.accent, modifier = Modifier.graphicsLayer { alpha = lit() })
+            }
         }
     }
 }

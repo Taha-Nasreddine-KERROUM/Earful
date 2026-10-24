@@ -198,6 +198,10 @@ class SheetWater {
     private var synced = false
     private var fy = 0f
     private var fv = 0f
+    // Rising, the contents only lag a hair behind the sheet (a stiffer, calmer spring and a small
+    // limit); coming down or dragged, they hang further behind. The limit eases between the two.
+    private var soft = false
+    private var limDp = 6f
 
     // the landing: the bar's dip into the tab bar, and the contents settling inside it
     var dip = 0f
@@ -225,7 +229,7 @@ class SheetWater {
 
     /** How far the contents sit from their place in the sheet (px, + = lower). */
     fun contentOffset(q: Float): Float {
-        val lim = (6f + 40f * q) * unit
+        val lim = limDp * unit
         var o = if (heavy && synced) lim * tanh((fy - (topOf(q) + dip)) / lim) else 0f
         if (coOn) o = (o + co).coerceIn(-lim - 3f * unit, lim + 3f * unit)
         return o
@@ -233,16 +237,16 @@ class SheetWater {
 
     internal fun opening(fromRest: Boolean) {
         armed = false
-        if (fromRest) {
-            val top = topOf(0f) + dip
-            if (!heavy || (abs(fy - top) < unit && abs(fv) < 5f * unit)) heavy = false
-            val delays = floatArrayOf(0.1f, 0.16f, 0.22f)
-            for (k in 0..2) { flX[k] = 30f * unit; flV[k] = 0f; flD[k] = delays[k]; flOn[k] = true }
-        } else settleFloats()
+        // The contents rise with the sheet, a hair behind it, and settle as it arrives: no waiting
+        // for the page to be full before they move.
+        if (!heavy) { heavy = true; synced = false; if (fromRest) limDp = 8f }
+        soft = true
+        settleFloats()
         wake++
     }
 
     internal fun closing(from: Float) {
+        soft = false
         if (!heavy) { heavy = true; synced = false }
         armed = from > 0f
         wake++
@@ -250,6 +254,7 @@ class SheetWater {
 
     fun dragStart() {
         dragging = true
+        soft = false
         if (!heavy) { heavy = true; synced = false }
         armed = false
         settleFloats()
@@ -329,8 +334,13 @@ class SheetWater {
         val top = topOf(q) + dip
         if (heavy) {
             if (!synced) { fy = top; fv = 0f; synced = true }
+            val k = if (soft) 260f else 110f
+            val z = if (soft) 0.75f else 0.5f
+            val limTo = if (soft) 8f else 6f + 40f * q
+            // (coming down it's at its full reach straight away, as before; rising it eases in)
+            limDp = if (soft) limDp + (limTo - limDp) * (1f - kotlin.math.exp(-dt * 8f)) else limTo
             for (i in 0 until n) {
-                fv += (-110f * (fy - top) - 2f * 0.5f * sqrt(110f) * fv) * h
+                fv += (-k * (fy - top) - 2f * z * sqrt(k) * fv) * h
                 fy += fv * h
             }
             if (!running && !dragging && abs(fy - top) < 0.3f * unit && abs(fv) < 0.5f * unit) { fy = top; fv = 0f }
@@ -356,7 +366,7 @@ class SheetWater {
 
     private fun touch(q: Float) {
         val top = topOf(q) + dip
-        val lim = (6f + 40f * q) * unit
+        val lim = limDp * unit
         val o = if (heavy && synced) lim * tanh((fy - top) / lim) else 0f
         // how hard the contents push it in depends on how fast they arrive
         val push = (70f + 0.09f * max(0f, fv / unit)).coerceIn(70f, 240f)
@@ -717,7 +727,7 @@ fun PlayerSheet(
                     // Grabber: says "this pulls down" without words.
                     Box(
                         Modifier.align(Alignment.TopCenter)
-                            .graphicsLayer { val a = fade(); alpha = a; translationY = (1f - a) * 48.dp.toPx() + held() * 0.75f }
+                            .graphicsLayer { val a = fade(); alpha = a; translationY = (1f - a) * 20.dp.toPx() + held() * 0.75f }
                             .padding(top = statusTop + 10.dp)
                             .size(56.dp, 24.dp)
                             .clickable(remember { MutableInteractionSource() }, null, onClickLabel = "Minimize") {
@@ -729,7 +739,7 @@ fun PlayerSheet(
                     }
                     Box(
                         Modifier.pageSized(W, H, bottom = true).graphicsLayer {
-                            val a = fade(); alpha = a; translationY = (1f - a) * 48.dp.toPx() + held() * 0.75f
+                            val a = fade(); alpha = a; translationY = (1f - a) * 20.dp.toPx() + held() * 0.75f
                         }
                     ) {
                         val controlsMod = if (!landscape) {

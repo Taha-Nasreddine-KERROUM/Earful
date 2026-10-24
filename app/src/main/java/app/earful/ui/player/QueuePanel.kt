@@ -151,16 +151,17 @@ fun QueuePanel(
                 val speed = if (dt > 0f) (v - lastV) / dt else 0f // panels per second
                 lastV = v
                 val moving = open.isRunning || abs(speed) > 0.01f
-                val opening = open.isRunning && open.targetValue == 1f
+                // Rising: sent up by a tap or a fling, or pulled up by a finger.
+                val opening = (open.isRunning && open.targetValue == 1f) || (!open.isRunning && speed > 0.05f)
                 // Climbs the sides while it moves (more when it's fast) and stays a hair raised once open.
                 val lift = when {
-                    moving -> (4f + (abs(speed) * panelHeight / unit * 0.006f).coerceAtMost(5f)) * unit
+                    moving -> (7f + (abs(speed) * panelHeight / unit * 0.01f).coerceAtMost(9f)) * unit
                     v > 0.5f -> 4f * unit
                     else -> 0f
                 }
-                val stir = if (opening) 1.5f * unit * min(1f, abs(speed) * 0.8f) else 0f
+                val stir = if (opening) 4f * unit * min(1f, abs(speed) * 0.8f) else 0f
                 // It arrives: one soft ripple, then it settles.
-                if (wasOpening && !opening && v > 0.98f) edge.settle(1.2f * unit)
+                if (wasOpening && !opening && v > 0.98f) edge.settle(3f * unit)
                 wasOpening = opening
                 edge.step(dt, lift, stir, unit)
                 edgeFrame = now
@@ -206,7 +207,7 @@ fun QueuePanel(
     }
 
     // Room above the panel for the water to climb its sides.
-    val lip = 12.dp
+    val lip = 18.dp
     val lipPx = with(density) { lip.toPx() }
     val path = remember { Path() }
     Column(
