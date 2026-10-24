@@ -43,6 +43,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.foundation.gestures.horizontalDrag
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
@@ -123,6 +127,8 @@ fun QueuePanel(
     downloads: Map<String, Float>,
     /** The video playing now is actually playing (its little bars move). */
     playing: Boolean = false,
+    /** Where playback is in the video right now (µs), so the bars move with what you hear. */
+    soundPosition: () -> Long = { 0L },
     onJump: (Int) -> Unit,
     onRemove: (Int) -> Unit,
     onClose: () -> Unit,
@@ -267,6 +273,7 @@ fun QueuePanel(
                 QueueRow(
                     entry = e,
                     playing = playing,
+                    soundPosition = soundPosition,
                     download = if (e.index == queue.currentIndex + 1) downloads[e.video.id] else null,
                     rows = rows,
                     order = { i - list.firstVisibleItemIndex },
@@ -295,6 +302,7 @@ fun QueuePanel(
 private fun QueueRow(
     entry: QueueEntry,
     playing: Boolean,
+    soundPosition: () -> Long,
     download: Float?,
     rows: QueueRowsMotion,
     order: () -> Int,
@@ -420,30 +428,10 @@ private fun QueueRow(
                         var finger = 0f
                         val give = 200.dp.toPx()
                         val commit = 80.dp.toPx()
+                        val early = 3.dp.toPx()
                         // Follows the finger, then gets heavy past 200 dp.
                         fun shown(f: Float) = if (f < -give) -give + (f + give) * 0.3f else f
-                        detectHorizontalDragGestures(
-                            onDragStart = {
-                                tracker.resetTracking()
-                                val d = dx.value
-                                finger = if (d < -give) -give + (d + give) / 0.3f else d
-                                stirring = true
-                            },
-                            onDragEnd = {
-                                val v = tracker.calculateVelocity().x
-                                fingerV = 0f
-                                crossed = false
-                                scope.launch {
-                                    if (dx.value < -commit || v < -650.dp.toPx()) drainAway()
-                                    else {
-                                        dx.animateTo(0f, Motion.rowBack(), v)
-                                        stirring = false
-                                    }
-                                }
-                            },
-                            onDragCancel = { fingerV = 0f; scope.launch { dx.animateTo(0f, Motion.rowBack()); stirring = false } },
-                        ) { change, amount ->
-                            change.consume()
+                        fun follow(change: androidx.compose.ui.input.pointer.PointerInputChange, amount: Float) {
                             tracker.addPosition(change.uptimeMillis, change.position)
                             fingerV = fingerV * 0.6f + tracker.calculateVelocity().x * 0.4f
                             finger = (finger + amount).coerceAtMost(0f)
@@ -451,6 +439,42 @@ private fun QueueRow(
                             val past = next < -commit
                             if (past != crossed) { crossed = past; if (past) Haptics.threshold(view) }
                             scope.launch { dx.snapTo(next) }
+                        }
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            // Decide in the first few pixels: more sideways than up/down (and to the
+                            // left, or the row is already out) is a swipe, and it's ours from there:
+                            // the panel and the list never see it, so nothing slides down. Up/down
+                            // is left to them (scrolling, closing the panel); a tap to the row.
+                            var total = Offset.Zero
+                            while (true) {
+                                val ev = awaitPointerEvent()
+                                val ch = ev.changes.firstOrNull { it.id == down.id } ?: return@awaitEachGesture
+                                if (!ch.pressed || ch.isConsumed) return@awaitEachGesture
+                                total += ch.positionChange()
+                                if (total.getDistance() >= early) {
+                                    val sideways = abs(total.x) > abs(total.y)
+                                    if (sideways && (total.x < 0f || dx.value < -0.5f)) { ch.consume(); break }
+                                    return@awaitEachGesture
+                                }
+                            }
+                            tracker.resetTracking()
+                            val d = dx.value
+                            finger = if (d < -give) -give + (d + give) / 0.3f else d
+                            stirring = true
+                            scope.launch { dx.snapTo(shown(finger + total.x).also { finger += total.x }) }
+                            val ended = horizontalDrag(down.id) { change ->
+                                val amount = change.positionChange().x // (read before it's marked as used)
+                                change.consume()
+                                follow(change, amount)
+                            }
+                            val v = tracker.calculateVelocity().x
+                            fingerV = 0f
+                            crossed = false
+                            scope.launch {
+                                if (ended && (dx.value < -commit || v < -650.dp.toPx())) drainAway()
+                                else { dx.animateTo(0f, Motion.rowBack(), if (ended) v else 0f); stirring = false }
+                            }
                         }
                     }
                 )
@@ -475,7 +499,7 @@ private fun QueueRow(
                 )
             }
             when {
-                entry.current -> NowPlayingBars(playing)
+                entry.current -> NowPlayingBars(playing, soundPosition)
                 download != null -> DownloadDot(download)
             }
         }
@@ -483,33 +507,57 @@ private fun QueueRow(
 }
 
 /**
- * Three small bars: "this one is playing". They bob like a level meter while it plays and sink
- * back to rest when it's paused. Only runs frames while it's playing and Up next is open.
+ * Three small bars: "this one is playing". They move with the sound you're hearing: the bass,
+ * the middle and the treble, each against its own recent loudness, jumping up on a beat and
+ * falling back more slowly, like a level meter. Paused, they sink back to rest and stop. Frames
+ * only run while it plays (and Up next is open).
  */
 @Composable
-private fun NowPlayingBars(playing: Boolean) {
-    val swing = remember { Animatable(if (playing) 1f else 0f) }
-    var t by remember { mutableFloatStateOf(0f) }
+private fun NowPlayingBars(playing: Boolean, soundPosition: () -> Long) {
+    val rest = remember { floatArrayOf(8f / 14f, 1f, 10f / 14f) }
+    val h = remember { floatArrayOf(8f / 14f, 1f, 10f / 14f) }
+    var tick by remember { mutableLongStateOf(0L) }
     LaunchedEffect(playing) {
-        if (playing) {
-            launch { swing.animateTo(1f, tween(260)) }
-            var last = 0L
-            while (true) withFrameNanos { now ->
-                if (last != 0L) t += (now - last) / 1e9f
+        val raw = FloatArray(3)
+        val peak = floatArrayOf(0.02f, 0.02f, 0.01f)
+        val want = FloatArray(3)
+        var last = 0L
+        var t = 0f
+        while (true) {
+            val more = withFrameNanos { now ->
+                val dt = if (last == 0L) 0f else ((now - last) / 1e9f).coerceAtMost(0.05f)
                 last = now
+                t += dt
+                when {
+                    playing && app.earful.playback.SoundLevels.at(soundPosition(), raw) -> for (k in 0..2) {
+                        // each band against its own recent loudness (that memory fades over ~4 s)
+                        peak[k] = maxOf(raw[k], peak[k] * kotlin.math.exp(-dt / 4f), 1e-4f)
+                        val rel = (raw[k] / peak[k]).coerceIn(0f, 1f)
+                        want[k] = 0.2f + 0.8f * Math.pow(rel.toDouble(), 0.8).toFloat()
+                    }
+                    // playing, but the sound isn't measured (yet): a gentle made-up bob
+                    playing -> for (k in 0..2) want[k] = 0.3f + 0.7f * abs(sin(t * (7.1f + k * 1.1f) + k * 1.9f))
+                    else -> for (k in 0..2) want[k] = rest[k]
+                }
+                var settled = true
+                for (k in 0..2) {
+                    val tau = if (want[k] > h[k]) 0.035f else 0.14f // quick up, slower down
+                    h[k] += (want[k] - h[k]) * (1f - kotlin.math.exp(-dt / tau))
+                    if (abs(h[k] - want[k]) > 0.005f) settled = false
+                }
+                tick = now
+                playing || !settled
             }
-        } else swing.animateTo(0f, tween(320))
+            if (!more) break
+        }
     }
-    val rest = floatArrayOf(8f / 14f, 1f, 10f / 14f)
-    val speed = floatArrayOf(7.1f, 9.4f, 8.2f)
-    val offset = floatArrayOf(0f, 1.9f, 3.7f)
     Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.Bottom, modifier = Modifier.height(14.dp)) {
         for (i in 0..2) {
             Box(
                 Modifier.width(3.dp).height(14.dp)
                     .graphicsLayer {
-                        val moving = 0.3f + 0.7f * abs(sin(t * speed[i] + offset[i]))
-                        scaleY = rest[i] + (moving - rest[i]) * swing.value
+                        @Suppress("UNUSED_VARIABLE") val f = tick // redraw on every measured frame
+                        scaleY = h[i]
                         transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 1f)
                     }
                     .clip(RoundedCornerShape(1.5.dp)).background(Color(0xFFFF6482))

@@ -81,7 +81,11 @@ class PlaybackService : MediaSessionService() {
 
         // Only an audio renderer: no video decoders are ever created or loaded.
         val renderers = RenderersFactory { handler, _, audioListener, _, _ ->
-            arrayOf(MediaCodecAudioRenderer(this, MediaCodecSelector.DEFAULT, handler, audioListener))
+            // The sound passes through a level meter on its way out (for the "playing" bars).
+            val sink = androidx.media3.exoplayer.audio.DefaultAudioSink.Builder(this)
+                .setAudioProcessors(arrayOf(LevelMeter()))
+                .build()
+            arrayOf(MediaCodecAudioRenderer(this, MediaCodecSelector.DEFAULT, handler, audioListener, sink))
         }
         // Only the two containers YouTube uses for audio, so nothing else is probed.
         val extractors = ExtractorsFactory { arrayOf(MatroskaExtractor(), FragmentedMp4Extractor(), Mp4Extractor()) }

@@ -952,6 +952,7 @@ fun PlayerSheet(
                     onJump = { conn.jumpTo(it) },
                     onRemove = { conn.remove(it) },
                     playing = np.playing,
+                    soundPosition = { conn.positionMs() * 1000L },
                     onClose = { scope.launch { sheet.closeQueue(tapped = true) } },
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
