@@ -114,7 +114,9 @@ fun Scrubber(
                 .pointerInput(dur) {
                     detectHorizontalDragGestures(
                         onDragStart = {
-                            dragFraction = held ?: live; dragging = true; Haptics.tick(view)
+                            // Start from where the bar is drawn right now. (This handler is made once,
+                            // so the position it saw then is long out of date; the bar's own value isn't.)
+                            dragFraction = shown.value; dragging = true; Haptics.tick(view)
                         },
                         onDragEnd = {
                             dragging = false; held = dragFraction
