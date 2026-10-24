@@ -82,9 +82,17 @@ internal fun TabBar(
     var tapping by remember { mutableStateOf<Job?>(null) }
     var width by remember { mutableFloatStateOf(0f) }
 
-    // Swipes (and anything else that turns the page) carry the icons with them.
+    // Swipes (and anything else that turns the page) carry the icons with them, and the gap
+    // between the two pages runs down into the bar like a stick dipped in water (F2).
     LaunchedEffect(Unit) {
         snapshotFlow { position() }.collect { pos ->
+            if (width > 0f) {
+                // Each page shrinks a little as it leaves (5% at most), about its own centre.
+                val half = width / 2f
+                val homeRight = -pos * width + half + half * (1f - 0.05f * pos.coerceIn(0f, 1f))
+                val savedLeft = (1f - pos) * width + half - half * (1f - 0.05f * (1f - pos).coerceIn(0f, 1f))
+                water.stick((homeRight + savedLeft) / 2f)
+            }
             if (tapping?.isActive == true) return@collect
             for (i in 0..1) {
                 val d = abs(pos - i).coerceIn(0f, 1f)
@@ -130,7 +138,7 @@ internal fun TabBar(
     Column(
         modifier
             .fillMaxWidth()
-            .onSizeChanged { width = it.width.toFloat() }
+            .onSizeChanged { width = it.width.toFloat(); water.size(width, density.density) }
             // The bar's background is the water; its top edge is the surface, and it ripples.
             .drawBehind {
                 @Suppress("UNUSED_VARIABLE") val f = water.frame

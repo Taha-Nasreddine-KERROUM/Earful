@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -434,7 +435,7 @@ fun PlayerSheet(
     LaunchedEffect(sheet) { sheet.water.run(sheet.progress) }
 
     // Artwork breathes: full size while playing, settles back when paused.
-    val artScale by animateFloatAsState(if (np.playing || np.waiting) 1f else 0.86f, Motion.lively(), label = "art")
+    val artScale = animateFloatAsState(if (np.playing || np.waiting) 1f else 0.86f, Motion.lively(), label = "art")
 
     val ctx = LocalContext.current
     var hintPending by remember { mutableStateOf(!ctx.prefs().getBoolean("hint_zones", false)) }
@@ -460,24 +461,18 @@ fun PlayerSheet(
             // The tab bar's surface ripples where the mini player lands on it.
             if (tabBarShown) water.ripple(W / 2, (2.5f + push / 60f).coerceIn(3f, 7f) * unit, 70f * unit, 11f * unit, 1.1f)
         }
-        @Suppress("UNUSED_VARIABLE") val frame = w.frame // redraw with the water
-
-        val p = sheet.progress.value.coerceIn(0f, 1f)
-        val pulled = sheet.dismiss.value
-
-        val sheetTop = lerp(collapsedTop, 0f, p) + pulled + w.dip
-        val sheetH = lerp(miniH, H, p)
-        val sideMargin = lerp(margin, 0f, p)
-        val sheetW = W - sideMargin * 2
-        val corner = lerp(14.dp.px(), 0f, p)
-        // contents trailing (heavy water) or settling after the landing; picture, title and controls floating up
-        val held = w.contentOffset(p)
-        // The tide on the top edge, only once it's clearly growing.
-        val tideA = min(1f, p * 4f)
-        val curl = w.edge.curl * tideA
-        val rip = w.edge.rip * tideA
-        val sheetShape = if (curl > 0.3f || rip > 0.3f) TideShape(corner, curl, rip, w.edge.phase, unit)
-            else RoundedCornerShape(corner)
+        // Everything that changes on every frame of a move (the progress, the water, the pull) is
+        // read only while laying out and drawing, never while composing: a moving player costs a
+        // few transforms per frame instead of rebuilding the whole screen.
+        fun pNow() = sheet.progress.value.coerceIn(0f, 1f)
+        fun held(): Float { w.frame; return w.contentOffset(pNow()) } // contents trailing / settling
+        fun fade() = ((pNow() - 0.35f) / 0.65f).coerceIn(0f, 1f)      // Now Playing's contents
+        val showChrome by remember { derivedStateOf { sheet.progress.value < 1f } }
+        val showBackdrop by remember { derivedStateOf { sheet.progress.value > 0.001f } }
+        val showMini by remember { derivedStateOf { sheet.progress.value < 0.3f } }
+        val showFull by remember { derivedStateOf { sheet.progress.value > 0.2f } }
+        val fullyOpen by remember { derivedStateOf { sheet.progress.value > 0.99f } }
+        val queueShown by remember { derivedStateOf { sheet.queue.value > 0.001f && sheet.progress.value > 0.9f } }
 
         // ----- artwork rectangles (relative to the sheet) ---------------------------------------
         val miniArtH = MiniArtH.px()
@@ -495,7 +490,6 @@ fun PlayerSheet(
             val ah = minOf(H - statusTop.px() - navBottom.px() - 64.dp.px(), W * 0.46f * 9f / 16f)
             Rect(32.dp.px(), (H - ah) / 2, ah * 16f / 9f, ah)
         }
-        val art = miniArt.lerpTo(fullArt, p)
 
         val queuePanelH = (H * 0.74f).coerceAtLeast(320.dp.px())
         val queueRange = queuePanelH
@@ -516,7 +510,8 @@ fun PlayerSheet(
                     touched = true
                     if (tabBarShown) {
                         water.ripple(W / 2, 9f * unit, 90f * unit, 11f * unit, 1.3f)
-                        if (lucky) water.splash(sideMargin, W - sideMargin, unit)
+                        val side = lerp(margin, 0f, pNow())
+                        if (lucky) water.splash(side, W - side, unit)
                     }
                 }
             }
@@ -526,16 +521,35 @@ fun PlayerSheet(
         Box(
             Modifier
                 .layout { m, _ ->
-                    val pl = m.measure(Constraints.fixed(sheetW.roundToInt(), sheetH.roundToInt()))
+                    val p = pNow()
+                    w.frame // moves with the water (the landing dip)
+                    val top = lerp(collapsedTop, 0f, p) + sheet.dismiss.value + w.dip
+                    val side = lerp(margin, 0f, p)
+                    val pl = m.measure(Constraints.fixed((W - side * 2f).roundToInt(), lerp(miniH, H, p).roundToInt()))
                     layout(pl.width, pl.height) {
-                        placedTop[0] = sheetTop.roundToInt().toFloat()
-                        pl.place(sideMargin.roundToInt(), sheetTop.roundToInt())
+                        placedTop[0] = top.roundToInt().toFloat()
+                        pl.place(side.roundToInt(), top.roundToInt())
                     }
                 }
-                // Sunk below its place it's under the tab bar already; without one, it fades out there.
-                .graphicsLayer { alpha = 1f - ((pulled - miniH - margin) / (20f * unit)).coerceIn(0f, 1f) }
-                .shadow(lerp(12f, 0f, p).dp, RoundedCornerShape(with(density) { corner.toDp() }), clip = false)
-                .graphicsLayer { shape = sheetShape; clip = true }
+                .graphicsLayer {
+                    val p = pNow()
+                    // Sunk below its place it's under the tab bar already; without one, it fades out there.
+                    alpha = 1f - ((sheet.dismiss.value - miniH - margin) / (20f * unit)).coerceIn(0f, 1f)
+                    shadowElevation = lerp(12f, 0f, p) * unit
+                    shape = RoundedCornerShape(lerp(14.dp.toPx(), 0f, p))
+                    clip = false
+                }
+                .graphicsLayer {
+                    // The tide on the top edge while it rises (only once it's clearly growing).
+                    w.frame
+                    val p = pNow()
+                    val corner = lerp(14.dp.toPx(), 0f, p)
+                    val tideA = min(1f, p * 4f)
+                    val curl = w.edge.curl * tideA
+                    val rip = w.edge.rip * tideA
+                    shape = if (curl > 0.3f || rip > 0.3f) TideShape(corner, curl, rip, w.edge.phase, unit) else RoundedCornerShape(corner)
+                    clip = true
+                }
                 .pointerInput(hasQueue, W) {
                     if (!hasQueue) return@pointerInput
                     val tracker = VelocityTracker()
@@ -665,59 +679,59 @@ fun PlayerSheet(
                 }
         ) {
             // Layer 1 — mini surface
-            if (p < 1f) Box(Modifier.fillMaxSize().background(palette.chrome))
-            // Layer 2 — blurred artwork backdrop
-            if (p > 0.001f) Backdrop(np.video.thumbnail, Modifier.fillMaxSize().graphicsLayer { alpha = p })
+            if (showChrome) Box(Modifier.fillMaxSize().background(palette.chrome))
+            // Layer 2 — blurred artwork backdrop. Laid out once at the full page's size (the sheet's
+            // clip shows what fits), so its blur is made once and reused, not redone every frame.
+            if (showBackdrop) Backdrop(np.video.thumbnail, Modifier.pageSized(W, H, bottom = false).graphicsLayer { alpha = pNow() })
 
             // Layer 3 — mini player content
-            if (p < 0.3f) {
+            if (showMini) {
                 MiniContent(
                     np = np, conn = conn,
                     textStart = with(density) { (miniArt.x + miniArt.w).toDp() } + 12.dp,
                     progress = if (np.durationMs > 0) pos.toFloat() / np.durationMs else 0f,
-                    modifier = Modifier.fillMaxWidth().height(MiniHeight)
+                    modifier = Modifier
+                        .layout { m, c ->
+                            val pl = m.measure(Constraints.fixed((W - margin * 2f).roundToInt(), miniH.roundToInt()))
+                            layout(minOf(pl.width, c.maxWidth), minOf(pl.height, c.maxHeight)) { pl.place(0, 0) }
+                        }
                         .graphicsLayer {
-                            alpha = (1f - p / 0.25f).coerceIn(0f, 1f)
-                            translationY = held * 0.5f
+                            alpha = (1f - pNow() / 0.25f).coerceIn(0f, 1f)
+                            translationY = held() * 0.5f
                         },
                     onExpand = { scope.launch { sheet.expand() } },
                     swipeX = { swipe.value },
                 )
             }
 
-            // Layers 4 and 5 sink back a little, softened, while Up next is over them.
-            val qOpen = sheet.queue.value
+            // Layers 4 and 5 sink back a little while Up next is over them.
             Box(
                 Modifier.fillMaxSize().graphicsLayer {
-                    if (qOpen > 0.001f) {
-                        val s = 1f - 0.03f * qOpen
-                        scaleX = s; scaleY = s
-                        if (Build.VERSION.SDK_INT >= 31) {
-                            val r = 4.dp.toPx() * qOpen
-                            renderEffect = if (r > 0.5f) BlurEffect(r, r, TileMode.Clamp) else null
-                        }
-                    }
+                    val q = sheet.queue.value
+                    if (q > 0.001f) { val s = 1f - 0.03f * q; scaleX = s; scaleY = s }
                 }
             ) {
-                // Layer 4 — Now Playing content
-                if (p > 0.2f) {
-                    val a = ((p - 0.35f) / 0.65f).coerceIn(0f, 1f)
+                // Layer 4 — Now Playing content: laid out once at the full page's size against the
+                // sheet's bottom, so while the sheet grows it only moves and fades.
+                if (showFull) {
+                    // Grabber: says "this pulls down" without words.
                     Box(
-                        Modifier.fillMaxSize().graphicsLayer {
-                            alpha = a; translationY = (1f - a) * 48.dp.toPx() + held * 0.75f
+                        Modifier.align(Alignment.TopCenter)
+                            .graphicsLayer { val a = fade(); alpha = a; translationY = (1f - a) * 48.dp.toPx() + held() * 0.75f }
+                            .padding(top = statusTop + 10.dp)
+                            .size(56.dp, 24.dp)
+                            .clickable(remember { MutableInteractionSource() }, null, onClickLabel = "Minimize") {
+                                scope.launch { sheet.collapse() }
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Box(Modifier.size(38.dp, 5.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.35f)))
+                    }
+                    Box(
+                        Modifier.pageSized(W, H, bottom = true).graphicsLayer {
+                            val a = fade(); alpha = a; translationY = (1f - a) * 48.dp.toPx() + held() * 0.75f
                         }
                     ) {
-                        // Grabber: says "this pulls down" without words.
-                        Box(
-                            Modifier.align(Alignment.TopCenter).padding(top = statusTop + 10.dp)
-                                .size(56.dp, 24.dp)
-                                .clickable(remember { MutableInteractionSource() }, null, onClickLabel = "Minimize") {
-                                    scope.launch { sheet.collapse() }
-                                },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Box(Modifier.size(38.dp, 5.dp).clip(CircleShape).background(Color.White.copy(alpha = 0.35f)))
-                        }
                         val controlsMod = if (!landscape) {
                             Modifier.align(Alignment.BottomCenter).fillMaxWidth()
                                 .onSizeChanged { controlsH = it.height.toFloat() }
@@ -734,31 +748,36 @@ fun PlayerSheet(
                             upcoming = queue.upcoming,
                             showUpNext = hasQueue,
                             onOpenQueue = { scope.launch { sheet.openQueue(tapped = true) } },
-                            titleShift = { w.float(1) },
-                            controlsShift = { w.float(2) },
+                            titleShift = { w.frame; w.float(1) }, // reading the frame redraws with the water
+                            controlsShift = { w.frame; w.float(2) },
                             queueOpen = { sheet.queue.value },
                             modifier = controlsMod,
                         )
                     }
                 }
 
-                // Layer 5 — the artwork, travelling between both layouts
-                val artCorner = with(density) { lerp(6.dp.toPx(), 12.dp.toPx(), p).toDp() }
-                val scale = lerp(1f, artScale, p)
-                val artFloat = w.float(0) * (p * 2f).coerceIn(0f, 1f)
+                // Layer 5 — the artwork, travelling between both layouts. Laid out once at its full
+                // size and scaled down to the mini player's (both are 16:9), so it never re-lays out.
                 Box(
                     Modifier
-                        .layout { m, _ ->
-                            val pl = m.measure(Constraints.fixed(art.w.roundToInt(), art.h.roundToInt()))
-                            layout(pl.width, pl.height) { pl.place(art.x.roundToInt(), art.y.roundToInt()) }
+                        .layout { m, c ->
+                            val pl = m.measure(Constraints.fixed(fullArt.w.roundToInt(), fullArt.h.roundToInt()))
+                            // (reports the sheet's size, so the small mini sheet doesn't squeeze and re-centre it)
+                            layout(c.maxWidth, c.maxHeight) { pl.place(fullArt.x.roundToInt(), fullArt.y.roundToInt()) }
                         }
                         .graphicsLayer {
-                            scaleX = scale; scaleY = scale
-                            translationX = swipe.value
-                            translationY = held + artFloat
+                            val p = pNow()
+                            val art = miniArt.lerpTo(fullArt, p)
+                            val breathe = lerp(1f, artScale.value, p)
+                            val s = art.w / fullArt.w * breathe
+                            scaleX = s; scaleY = s // about its centre
+                            translationX = art.x + art.w / 2f - (fullArt.x + fullArt.w / 2f) + swipe.value
+                            translationY = art.y + art.h / 2f - (fullArt.y + fullArt.h / 2f) + held() +
+                                w.float(0) * (p * 2f).coerceIn(0f, 1f)
                             alpha = 1f - (abs(swipe.value) / W * 0.7f).coerceIn(0f, 0.7f)
-                            shadowElevation = lerp(0f, 22.dp.toPx(), p) * scale
-                            shape = RoundedCornerShape(artCorner)
+                            shadowElevation = lerp(0f, 22.dp.toPx(), p) * breathe
+                            // the corner is drawn before the scaling, so it's sized up to look right after it
+                            shape = RoundedCornerShape(lerp(6.dp.toPx(), 12.dp.toPx(), p) / s.coerceAtLeast(0.05f))
                             clip = true
                             ambientShadowColor = Color.Black; spotShadowColor = Color.Black
                         }
@@ -766,22 +785,23 @@ fun PlayerSheet(
                 ) {
                     RemoteImage(np.video.thumbnail, Modifier.fillMaxSize())
                     ArtworkGestures(
-                        enabled = p > 0.99f,
+                        enabled = fullyOpen,
                         playing = np.playing,
                         onSeek = { s -> conn.seekBy(s * 1000L) },
                         onToggle = { conn.togglePlay() },
                         modifier = Modifier.fillMaxSize(),
-                        showHint = hintPending && p > 0.99f,
+                        showHint = hintPending && fullyOpen,
                         onHintShown = { hintPending = false; ctx.prefs().edit().putBoolean("hint_zones", true).apply() },
                     )
                 }
             }
 
             // Layer 6 — "Up next", rising over everything like a calm tide
-            if (qOpen > 0.001f && p > 0.9f && hasQueue) {
+            if (queueShown && hasQueue) {
                 Box(
                     Modifier.fillMaxSize()
-                        .background(Color.Black.copy(alpha = 0.18f * qOpen))
+                        .graphicsLayer { alpha = sheet.queue.value.coerceIn(0f, 1f) }
+                        .background(Color.Black.copy(alpha = 0.18f))
                         .clickable(remember { MutableInteractionSource() }, null, onClickLabel = "Close queue") {
                             scope.launch { sheet.closeQueue(tapped = true) }
                         }
@@ -801,6 +821,16 @@ fun PlayerSheet(
             }
         }
     }
+}
+
+/**
+ * Lays its content out once at the full page's size, whatever size the sheet is right now, so it
+ * isn't measured (or re-blurred) again on every frame the sheet grows. The sheet's clip shows the
+ * part that fits: its top, or (with [bottom]) its bottom.
+ */
+private fun Modifier.pageSized(w: Float, h: Float, bottom: Boolean) = layout { m, c ->
+    val pl = m.measure(Constraints.fixed(w.roundToInt(), h.roundToInt()))
+    layout(c.maxWidth, c.maxHeight) { pl.place((c.maxWidth - pl.width) / 2, if (bottom) c.maxHeight - pl.height else 0) }
 }
 
 @Composable

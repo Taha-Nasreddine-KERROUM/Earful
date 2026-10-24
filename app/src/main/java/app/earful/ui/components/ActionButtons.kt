@@ -264,10 +264,19 @@ private fun DrawScope.queueGlyph(color: Color, t: Float, wave: Float) {
     // The tick: drawn in like a pen stroke, un-drawn on release.
     val draw = ((t - 0.3f) / 0.7f).coerceIn(0f, 1f)
     if (draw > 0f) {
-        val path = Path().apply { moveTo(14.5f, 16.8f); lineTo(16.7f, 19f); lineTo(21f, 14.4f) }
-        val m = PathMeasure().apply { setPath(path, false) }
-        val seg = Path()
-        m.getSegment(0f, m.length * draw, seg, true)
-        drawPath(seg, color, style = Stroke(stroke, cap = StrokeCap.Round, join = StrokeJoin.Round))
+        val style = Stroke(stroke, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        if (draw >= 1f) drawPath(Tick.path, color, style = style)
+        else {
+            Tick.seg.reset()
+            Tick.measure.getSegment(0f, Tick.measure.length * draw, Tick.seg, true)
+            drawPath(Tick.seg, color, style = style)
+        }
     }
+}
+
+/** The tick, built once (lists draw many queue buttons; nothing is allocated per frame). */
+private object Tick {
+    val path = Path().apply { moveTo(14.5f, 16.8f); lineTo(16.7f, 19f); lineTo(21f, 14.4f) }
+    val measure = PathMeasure().apply { setPath(path, false) }
+    val seg = Path()
 }

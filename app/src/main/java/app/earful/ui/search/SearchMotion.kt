@@ -18,6 +18,8 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.lerp
 import app.earful.ui.components.Icons
@@ -67,9 +69,11 @@ class SearchMotion {
     var shown by mutableStateOf(false)
         private set
 
-    /** Where the magnifier on Home is, and where the search field is (window px). */
-    var from by mutableStateOf<Rect?>(null)
-    var to by mutableStateOf<Rect?>(null)
+    /** The magnifier on Home (where the field grows from), and where the search field is (root px). */
+    var anchor: LayoutCoordinates? = null
+    var target: LayoutCoordinates? = null
+    /** Where the field was last time, for the first frame before it's placed again. */
+    internal var lastTarget: Rect? = null
 
     suspend fun open(barSink: Float) = coroutineScope {
         if (open) return@coroutineScope
@@ -131,12 +135,14 @@ fun SearchMorph(motion: SearchMotion, modifier: Modifier = Modifier) {
     val glyph = rememberVectorPainter(Icons.Search)
     Canvas(modifier.fillMaxSize()) {
         if (!motion.morphing) return@Canvas
-        val a = motion.from ?: return@Canvas
-        val b = motion.to ?: return@Canvas
-        val e = motion.morph.value
-        val ec = e.coerceIn(0f, 1f)
+        val a = motion.anchor?.takeIf { it.isAttached }?.boundsInRoot() ?: return@Canvas
         val circle = 40.dp.toPx()
         val r0 = Rect(Offset(a.center.x - circle / 2, a.center.y - circle / 2), Size(circle, circle))
+        // (The very first frame, before the field has been placed, the circle simply stays put.)
+        val b = motion.target?.takeIf { it.isAttached }?.boundsInRoot()?.also { motion.lastTarget = it }
+            ?: motion.lastTarget ?: r0
+        val e = motion.morph.value
+        val ec = e.coerceIn(0f, 1f)
         val left = lerp(r0.left, b.left, e)
         val top = lerp(r0.top, b.top, e)
         val w = lerp(r0.width, b.width, e)

@@ -2,7 +2,6 @@ package app.earful.ui
 
 import android.app.Activity
 import android.content.Context
-import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -41,9 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -73,7 +70,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
-import kotlin.math.max
 
 class Toast(val text: String, val action: String? = null, val onAction: (() -> Unit)? = null, val id: Long = System.nanoTime())
 
@@ -185,17 +181,15 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
             state = pager,
             modifier = Modifier.fillMaxSize().graphicsLayer {
                 // Behind the player (rising like the tide) and behind search (Home going under),
-                // the pages sink back a little, soften and dim.
+                // the pages sink back a little and dim. (No blur: re-blurring a whole screen on
+                // every frame is what made it stutter.)
                 val q = playerOpen()
-                if (q > 0.999f && !sheet.water.dragging) { alpha = 0f; return@graphicsLayer } // fully covered
                 val hu = search.homeUnder.value
                 val s = (1f - 0.06f * hu) * (1f - 0.03f * q)
                 scaleX = s; scaleY = s
                 alpha = 1f - 0.5f * hu
-                if (Build.VERSION.SDK_INT >= 31) {
-                    val r = 4.dp.toPx() * max(hu, q)
-                    renderEffect = if (r > 0.5f) BlurEffect(r, r, TileMode.Clamp) else null
-                }
+                // Fully covered (by the player, or by search's own background): not drawn at all.
+                if ((q > 0.999f && !sheet.water.dragging) || search.bg.value > 0.999f) alpha = 0f
             },
             beyondViewportPageCount = 1, // the other page is already laid out: swipes never stutter
             key = { it },

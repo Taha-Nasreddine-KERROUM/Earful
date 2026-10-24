@@ -1,0 +1,4 @@
+# Baseline profile: tells Android to compile the app's own code ahead of time when it's installed,
+# instead of running it slowly (interpreted) the first times. Compose ships its own profile.
+HSPLapp/earful/**;->**(**)**
+Lapp/earful/**;

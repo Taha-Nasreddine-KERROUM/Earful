@@ -49,7 +49,112 @@ class Water {
     var frame by mutableLongStateOf(0L)
         private set
 
-    private val calm get() = waves.isEmpty() && drops.isEmpty()
+    private val calm get() = waves.isEmpty() && drops.isEmpty() && !surfaceOn
+
+    // ----- F2 · a stick in water ---------------------------------------------------------------
+    // The bar's surface as water in a cup (a 1-D wave equation whose ends reflect like the cup's
+    // walls). The gap between the two pages, while it slides across, is a stick dragged through it:
+    // water piles up in front, dips behind and leaves ripples that bounce off the sides and settle.
+    private var unit = 1f
+    private var barWidth = 0f
+    private var n = 0
+    private var dx = 1f
+    private var h = FloatArray(0)
+    private var v = FloatArray(0)
+    private var lap = FloatArray(0)
+    private var surfaceOn = false
+    private var stickX = -1e6f
+    private var stickPx = Float.NaN
+    private var stickV = 0f
+    private var stickC = 0f
+    private var stickIn = false
+
+    /** The bar's width and px per dp; the surface is laid out from these. */
+    fun size(width: Float, unit: Float) {
+        if (width == barWidth && unit == this.unit) return
+        barWidth = width; this.unit = unit
+        n = ((width / unit) / 3f).toInt().coerceAtLeast(8) + 1
+        dx = width / (n - 1)
+        h = FloatArray(n); v = FloatArray(n); lap = FloatArray(n)
+        surfaceOn = false
+    }
+
+    /**
+     * Where the stick (the gap between the pages) is, in px from the bar's left edge. Called on
+     * every frame the pages move; outside the bar it simply isn't in the water.
+     */
+    fun stick(x: Float) {
+        if (n == 0) return
+        stickX = x
+        val c = (min(x + 4f * unit, barWidth + 4f * unit - x) / (10f * unit)).coerceIn(0f, 1f)
+        if (c > 0f && !stickIn) {
+            // a small dip as it enters the water
+            stickIn = true
+            impulse(x.coerceIn(0f, barWidth), 10f * unit, 160f * unit * STICK_K)
+        }
+        if (c <= 0f) stickIn = false
+        stickC = c
+        if (c > 0f && !surfaceOn) { surfaceOn = true; stickPx = Float.NaN; stickV = 0f; wake++ }
+    }
+
+    private fun impulse(x0: Float, w: Float, amt: Float) {
+        for (i in 0 until n) { val g = (i * dx - x0) / w; v[i] += amt * exp(-g * g) }
+        if (!surfaceOn) { surfaceOn = true; stickPx = Float.NaN; stickV = 0f; wake++ }
+    }
+
+    private fun stepSurface(dt: Float) {
+        if (dt > 0f) {
+            if (!stickPx.isNaN()) stickV = stickV * 0.5f + (stickX - stickPx) / dt * 0.5f
+            stickPx = stickX
+        }
+        val c2 = (200f * unit) * (200f * unit) / (dx * dx)
+        val nu = 250f * unit * unit / (dx * dx)
+        val sub = kotlin.math.max(1, kotlin.math.ceil(dt / 0.0015f).toInt())
+        val hh = dt / sub
+        val s = 13f * unit
+        val kPush = 0.07f * STICK_K
+        val kDrag = 0.01f * STICK_K / unit
+        val rate = 1f - exp(-hh * 60f)
+        repeat(sub) {
+            for (i in 0 until n) {
+                val l = if (i > 0) v[i - 1] else v[i]
+                val r = if (i < n - 1) v[i + 1] else v[i]
+                lap[i] = l + r - 2f * v[i]
+            }
+            for (i in 0 until n) {
+                val l = if (i > 0) h[i - 1] else h[i]
+                val r = if (i < n - 1) h[i + 1] else h[i]
+                v[i] += (c2 * (l + r - 2f * h[i]) - 1.8f * v[i] - 20f * h[i] + nu * lap[i]) * hh
+            }
+            for (i in 0 until n) h[i] += v[i] * hh
+            if (stickC > 0f) {
+                val lo = kotlin.math.max(0, ((stickX - 4f * s) / dx).toInt())
+                val hi = kotlin.math.min(n - 1, ((stickX + 4f * s) / dx).toInt() + 1)
+                for (i in lo..hi) {
+                    val u = (i * dx - stickX) / s
+                    val g = exp(-u * u)
+                    val target = ((-kPush * stickV * u * g).coerceIn(-14f * unit, 14f * unit) - 1.5f * unit * g) * stickC
+                    h[i] += (target - h[i]) * rate * g * 0.6f
+                    v[i] += -kDrag * stickV * abs(stickV) * u * g * hh * stickC
+                }
+            }
+        }
+        // Still again (and the stick out of the water): flat, and the water sleeps.
+        if (stickC <= 0f) {
+            var m = 0f
+            for (i in 0 until n) m = kotlin.math.max(m, kotlin.math.max(abs(h[i]), abs(v[i]) * 0.05f))
+            // (below ~0.4 dp nobody can see it move, so stop drawing frames for it)
+            if (m < 0.4f * unit) { h.fill(0f); v.fill(0f); surfaceOn = false; stickPx = Float.NaN; stickV = 0f }
+        }
+    }
+
+    private fun surfaceAt(x: Float): Float {
+        if (!surfaceOn || n == 0) return 0f
+        val f = (x / dx).coerceIn(0f, (n - 1).toFloat())
+        val i = f.toInt().coerceAtMost(n - 2)
+        val t = f - i
+        return h[i] + (h[i + 1] - h[i]) * t
+    }
 
     /**
      * A ring of ripples centred on [cx] (px from the bar's left edge). [amp] is how high the first
@@ -86,7 +191,7 @@ class Water {
 
     /** How far the surface is lowered (positive) or raised (negative) at [x]. */
     fun height(x: Float): Float {
-        var y = 0f
+        var y = surfaceAt(x)
         for (w in waves) {
             val t = w.t
             val dx = x - w.cx
@@ -115,6 +220,7 @@ class Water {
     }
 
     private fun step(dt: Float) {
+        if (surfaceOn) stepSurface(dt)
         for (w in waves) w.t += dt
         waves.removeAll { it.t > it.duration }
         for (d in drops) {
@@ -126,6 +232,11 @@ class Water {
         drops.removeAll { (it.vy > 0 && it.y > floor) || it.life > 3f }
     }
 
+    private companion object {
+        /** Wave size: medium. */
+        const val STICK_K = 1f
+    }
+
     private val edge = Path()
     private val body = Path()
 
@@ -134,7 +245,7 @@ class Water {
      * The surface sits at y = 0 of [scope]; ripples rise above it, outside the bar.
      */
     fun draw(scope: DrawScope, fill: Color, line: Color, lineWidth: Float, drop: Color) = with(scope) {
-        if (waves.isEmpty()) {
+        if (waves.isEmpty() && !surfaceOn) {
             drawRect(fill)
             drawLine(line, Offset(0f, lineWidth / 2), Offset(size.width, lineWidth / 2), lineWidth)
         } else {

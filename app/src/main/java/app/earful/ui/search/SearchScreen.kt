@@ -45,9 +45,8 @@ import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.layout
-import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.ImeAction
@@ -195,7 +194,7 @@ fun SearchScreen(
                 }
                 Row(
                     Modifier.weight(1f).height(40.dp)
-                        .onGloballyPositioned { motion.to = it.boundsInRoot() }
+                        .onPlaced { motion.target = it }
                         .graphicsLayer { alpha = motion.field.value }
                         .clip(RoundedCornerShape(12.dp)).background(p.fill).padding(horizontal = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
