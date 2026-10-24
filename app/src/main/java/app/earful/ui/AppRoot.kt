@@ -129,13 +129,17 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     val queuedIds = remember(queueState) { queueState.entries.filter { !it.passed }.mapTo(HashSet()) { it.video.id } }
 
     fun enqueue(v: Video) {
-        val current = queueState.entries.firstOrNull { it.current }?.video?.id
+        // Read the queue as it is right now: the lists can hold on to this function from an
+        // earlier moment, and an old copy of the queue would never see the video as queued.
+        val q = conn.queue.value
+        val current = q.entries.firstOrNull { it.current }?.video?.id
+        val waiting = q.entries.any { !it.passed && !it.current && it.video.id == v.id }
         when {
             v.id == current -> toast = Toast("Playing now")
-            v.id in queuedIds -> { conn.dequeue(v.id); toast = Toast("Removed from queue") }
+            waiting -> { conn.dequeue(v.id); toast = Toast("Removed from queue") }
             else -> when (conn.enqueue(v)) {
                 EnqueueResult.Added -> toast = Toast("Added to queue")
-                EnqueueResult.AlreadyQueued -> toast = Toast("Already in the queue")
+                EnqueueResult.AlreadyQueued -> { conn.dequeue(v.id); toast = Toast("Removed from queue") }
                 EnqueueResult.StartedPlaying -> Unit // the mini player appearing says it all
             }
         }
