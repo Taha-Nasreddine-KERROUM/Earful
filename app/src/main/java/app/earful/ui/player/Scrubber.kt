@@ -29,6 +29,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
@@ -134,41 +135,40 @@ fun Scrubber(
                 val sigma = 18.dp.toPx()
                 val px = size.width * fraction
                 val thin = 1.5.dp.toPx()
-                // Thickness along the bar: a bead of water around the playhead.
+                // Thickness along the bar: the bead of water is the bar itself swelling around the
+                // playhead (no separate knob, so nothing to stick out or leave a gap).
                 fun th(x: Float): Float {
                     val g = (x - px) / sigma
                     return kotlin.math.max(thin, base + bulge * kotlin.math.exp(-g * g))
                 }
-                fun draw(x0: Float, x1: Float, color: Color) {
-                    if (x1 <= x0) return
-                    val r0 = th(x0) / 2
-                    val r1 = th(x1) / 2
-                    val a = x0 + r0
-                    val b = kotlin.math.max(a, x1 - r1)
-                    band.reset()
-                    band.moveTo(a, cy - th(a) / 2)
-                    var x = a
-                    val step = 2.dp.toPx()
-                    while (x < b) { x = kotlin.math.min(b, x + step); band.lineTo(x, cy - th(x) / 2) }
-                    band.arcTo(Rect(Offset(b, cy), th(b) / 2), -90f, 180f, false)
-                    x = b
-                    while (x > a) { x = kotlin.math.max(a, x - step); band.lineTo(x, cy + th(x) / 2) }
-                    band.arcTo(Rect(Offset(a, cy), th(a) / 2), 90f, 180f, false)
-                    band.close()
-                    drawPath(band, color)
-                }
-                draw(0f, size.width, Color.White.copy(alpha = 0.18f))
-                if (downloaded > 0f) draw(0f, size.width * downloaded, Color.White.copy(alpha = 0.16f))
-                draw(0f, kotlin.math.max(px, base), Color.White.copy(alpha = brightness))
+                // One liquid shape for the whole bar; every part (played, saved offline, sponsor
+                // sections) is the same shape cut at its ends, so they always line up exactly.
+                val w = size.width
+                val r0 = th(0f) / 2
+                val r1 = th(w) / 2
+                val a = r0
+                val b = kotlin.math.max(a, w - r1)
+                band.reset()
+                band.moveTo(a, cy - th(a) / 2)
+                var x = a
+                val step = 1.5.dp.toPx()
+                while (x < b) { x = kotlin.math.min(b, x + step); band.lineTo(x, cy - th(x) / 2) }
+                band.arcTo(Rect(Offset(b, cy), th(b) / 2), -90f, 180f, false)
+                x = b
+                while (x > a) { x = kotlin.math.max(a, x - step); band.lineTo(x, cy + th(x) / 2) }
+                band.arcTo(Rect(Offset(a, cy), th(a) / 2), 90f, 180f, false)
+                band.close()
+                drawPath(band, Color.White.copy(alpha = 0.18f))
+                if (downloaded > 0f) clipRect(right = w * downloaded) { drawPath(band, Color.White.copy(alpha = 0.16f)) }
+                clipRect(right = px) { drawPath(band, Color.White.copy(alpha = brightness)) }
                 // Sponsor sections that get skipped, in yellow, so you can see where they were.
                 ads.forEach { ad ->
-                    val x0 = size.width * (ad.startMs.toFloat() / dur).coerceIn(0f, 1f)
-                    val x1 = size.width * (ad.endMs.toFloat() / dur).coerceIn(0f, 1f)
-                    if (x1 > x0) draw(x0, kotlin.math.max(x1, x0 + base * 0.6f), Color(0xFFFFD60A).copy(alpha = 0.85f))
+                    val x0 = w * (ad.startMs.toFloat() / dur).coerceIn(0f, 1f)
+                    val x1 = w * (ad.endMs.toFloat() / dur).coerceIn(0f, 1f)
+                    if (x1 > x0) clipRect(left = x0, right = kotlin.math.max(x1, x0 + base * 0.6f)) {
+                        drawPath(band, Color(0xFFFFD60A).copy(alpha = 0.85f))
+                    }
                 }
-                // The bead itself, at the playhead: hidden in the bar at rest, round while it swells.
-                val r = kotlin.math.max(2.dp.toPx(), 3.dp.toPx() + bulge * 0.55f)
-                if (r > base / 2 + 0.5f) drawCircle(Color.White.copy(alpha = brightness), r, Offset(px.coerceIn(r, size.width - r), cy))
             }
         }
         val shownMs = (fraction * dur).toLong()

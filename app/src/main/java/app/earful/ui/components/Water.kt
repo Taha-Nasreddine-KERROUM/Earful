@@ -103,19 +103,28 @@ class Water {
     }
 
     private fun stepSurface(dt: Float) {
+        // Where the gap was last frame: within a frame it slides there-to-here, rather than
+        // jumping (a quick swipe moves it tens of dp per frame).
+        val fromX = if (stickPx.isNaN()) stickX else stickPx
         if (dt > 0f) {
-            if (!stickPx.isNaN()) stickV = stickV * 0.5f + (stickX - stickPx) / dt * 0.5f
+            // Smoothed, and capped: a fast fling moves the gap far quicker than waves can travel,
+            // and pushing that hard only shatters the surface into lots of small wavelets.
+            if (!stickPx.isNaN()) {
+                val raw = ((stickX - stickPx) / dt).coerceIn(-STICK_MAX * unit, STICK_MAX * unit)
+                stickV = stickV * 0.65f + raw * 0.35f
+            }
             stickPx = stickX
         }
         val c2 = (200f * unit) * (200f * unit) / (dx * dx)
-        val nu = 250f * unit * unit / (dx * dx)
+        val nu = 450f * unit * unit / (dx * dx) // smooths away the tiniest ripples
         val sub = kotlin.math.max(1, kotlin.math.ceil(dt / 0.0015f).toInt())
         val hh = dt / sub
         val s = 13f * unit
         val kPush = 0.07f * STICK_K
         val kDrag = 0.01f * STICK_K / unit
         val rate = 1f - exp(-hh * 60f)
-        repeat(sub) {
+        repeat(sub) { j ->
+            val sx = fromX + (stickX - fromX) * (j + 1) / sub
             for (i in 0 until n) {
                 val l = if (i > 0) v[i - 1] else v[i]
                 val r = if (i < n - 1) v[i + 1] else v[i]
@@ -128,10 +137,10 @@ class Water {
             }
             for (i in 0 until n) h[i] += v[i] * hh
             if (stickC > 0f) {
-                val lo = kotlin.math.max(0, ((stickX - 4f * s) / dx).toInt())
-                val hi = kotlin.math.min(n - 1, ((stickX + 4f * s) / dx).toInt() + 1)
+                val lo = kotlin.math.max(0, ((sx - 4f * s) / dx).toInt())
+                val hi = kotlin.math.min(n - 1, ((sx + 4f * s) / dx).toInt() + 1)
                 for (i in lo..hi) {
-                    val u = (i * dx - stickX) / s
+                    val u = (i * dx - sx) / s
                     val g = exp(-u * u)
                     val target = ((-kPush * stickV * u * g).coerceIn(-14f * unit, 14f * unit) - 1.5f * unit * g) * stickC
                     h[i] += (target - h[i]) * rate * g * 0.6f
@@ -235,6 +244,8 @@ class Water {
     private companion object {
         /** Wave size: medium. */
         const val STICK_K = 1f
+        /** The fastest the gap is felt to move (dp/s). */
+        const val STICK_MAX = 1300f
     }
 
     private val edge = Path()

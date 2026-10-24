@@ -239,7 +239,7 @@ class SheetWater {
         armed = false
         // The contents rise with the sheet, a hair behind it, and settle as it arrives: no waiting
         // for the page to be full before they move.
-        if (!heavy) { heavy = true; synced = false; if (fromRest) limDp = 8f }
+        if (!heavy) { heavy = true; synced = false; if (fromRest) limDp = 12f }
         soft = true
         settleFloats()
         wake++
@@ -334,9 +334,13 @@ class SheetWater {
         val top = topOf(q) + dip
         if (heavy) {
             if (!synced) { fy = top; fv = 0f; synced = true }
-            val k = if (soft) 260f else 110f
-            val z = if (soft) 0.75f else 0.5f
-            val limTo = if (soft) 8f else 6f + 40f * q
+            // Under a finger, going up the contents follow lightly; going down they hang heavy.
+            if (dragging) { if (pv > 0.3f) soft = true else if (pv < -0.3f) soft = false }
+            // Rising: they lag behind by as much as the sheet's speed asks (up to 12 dp) and, as
+            // it stops, carry on a little and settle: the faster it came up, the bigger the bounce.
+            val k = if (soft) 220f else 110f
+            val z = if (soft) 0.6f else 0.5f
+            val limTo = if (soft) 12f else 6f + 40f * q
             // (coming down it's at its full reach straight away, as before; rising it eases in)
             limDp = if (soft) limDp + (limTo - limDp) * (1f - kotlin.math.exp(-dt * 8f)) else limTo
             for (i in 0 until n) {
