@@ -57,6 +57,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.onPlaced
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -86,6 +87,7 @@ fun HomeScreen(
     topSignal: Int,
     onMessage: (String) -> Unit,
     onQueue: (Video) -> Unit,
+    search: app.earful.ui.search.SearchMotion,
     model: FeedModel = viewModel(),
 ) {
     val p = LocalPalette.current
@@ -230,17 +232,18 @@ fun HomeScreen(
                 }.padding(horizontal = 8.dp, vertical = 6.dp)
             ) { Wordmark(beat = logoBeat) }
             Spacer(Modifier.weight(1f))
-            // The magnifier tilts as if picked up, then you're in search.
-            val tilt = remember { androidx.compose.animation.core.Animatable(0f) }
-            Box(Modifier.size(44.dp).pressable(scaleTo = 0.85f, label = "Search") {
-                scope.launch {
-                    tilt.animateTo(-20f, androidx.compose.animation.core.tween(110))
-                    tilt.animateTo(0f, Motion.lively())
-                }
-                onOpenSearch()
-            }, contentAlignment = Alignment.Center) {
-                Icon(Icons.Search, p.label, size = 24.dp, contentDescription = "Search",
-                    modifier = Modifier.graphicsLayer { rotationZ = tilt.value })
+            // The magnifier dips as if it has weight, then grows into the search field.
+            Box(
+                Modifier.size(44.dp)
+                    .onPlaced { search.anchor = it } // read only while the morph runs: no work per frame
+                    .graphicsLayer {
+                        scaleX = search.dip.value; scaleY = search.dip.value
+                        alpha = if (search.morphing || search.shown) 0f else 1f
+                    }
+                    .pressable(scaleTo = 0.85f, label = "Search", onClick = onOpenSearch),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Search, p.label, size = 24.dp, contentDescription = "Search")
             }
         }
     }

@@ -10,17 +10,13 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -47,9 +43,9 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -58,14 +54,15 @@ import app.earful.data.Video
 import app.earful.playback.PlayerConnection
 import app.earful.playback.EnqueueResult
 import app.earful.playback.PlaybackEvents
-import app.earful.ui.components.Icon
-import app.earful.ui.components.Icons
 import app.earful.ui.components.Text
+import app.earful.ui.components.Water
 import app.earful.ui.components.pressable
 import app.earful.ui.home.HomeScreen
 import app.earful.ui.player.PlayerSheet
 import app.earful.ui.player.SheetState
 import app.earful.ui.saved.SavedScreen
+import app.earful.ui.search.SearchMorph
+import app.earful.ui.search.SearchMotion
 import app.earful.ui.search.SearchScreen
 import app.earful.ui.theme.LocalPalette
 import app.earful.ui.theme.Type
@@ -73,8 +70,6 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
-
-private enum class Tab { Home, Saved }
 
 class Toast(val text: String, val action: String? = null, val onAction: (() -> Unit)? = null, val id: Long = System.nanoTime())
 
@@ -88,6 +83,7 @@ class AppSignals {
 fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     val p = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
     val sheet = remember { SheetState() }
     val np by conn.state.collectAsStateWithLifecycle()
     // Home and Saved sit side by side: swipe between them, or tap the tab bar.
@@ -97,6 +93,10 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     var homeTopSignal by remember { mutableIntStateOf(0) }
     fun goTo(t: Tab) = scope.launch { pager.animateScrollToPage(t.ordinal, animationSpec = Motion.sheet()) }
     var searchOpen by rememberSaveable { mutableStateOf(false) }
+    val search = remember { SearchMotion() }
+    // The tab bar's surface: ripples from taps, landings and things sinking under it.
+    val water = remember { Water() }
+    LaunchedEffect(water) { water.run() }
     var toast by remember { mutableStateOf<Toast?>(null) }
     val keyboard = LocalSoftwareKeyboardController.current
     val ctx = LocalContext.current
@@ -105,6 +105,24 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     val tabBarHeight = 52.dp + navBottom
     val bottomBar by animateDpAsState(if (searchOpen) navBottom else tabBarHeight, label = "bar")
     val contentBottom = bottomBar + if (np != null) 72.dp else 0.dp
+    // How far the tab bar sinks while search is open (dp): all the way under.
+    val barSink = tabBarHeight.value + 18f
+
+    // Restored with search open (the screen rotated): show it straight away.
+    LaunchedEffect(Unit) { if (searchOpen && !search.open) search.snapOpen(barSink) }
+
+    fun openSearch() {
+        if (searchOpen) return
+        searchOpen = true
+        scope.launch { search.open(barSink) }
+    }
+
+    fun closeSearch() {
+        keyboard?.hide()
+        if (!searchOpen) return
+        searchOpen = false
+        scope.launch { search.close() }
+    }
 
     // The queue button is a toggle: on = waiting in the queue, off = not.
     val queueState by conn.queue.collectAsStateWithLifecycle()
@@ -154,11 +172,25 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
 
     StatusBarFollowsSheet(sheet)
 
+    // How far the player is open (0 while there's none).
+    fun playerOpen() = if (np != null) sheet.progress.value.coerceIn(0f, 1f) else 0f
+
     CompositionLocalProvider(app.earful.ui.components.LocalQueuedIds provides queuedIds) {
     Box(Modifier.fillMaxSize().background(p.bg)) {
         HorizontalPager(
             state = pager,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().graphicsLayer {
+                // Behind the player (rising like the tide) and behind search (Home going under),
+                // the pages sink back a little and dim. (No blur: re-blurring a whole screen on
+                // every frame is what made it stutter.)
+                val q = playerOpen()
+                val hu = search.homeUnder.value
+                val s = (1f - 0.06f * hu) * (1f - 0.03f * q)
+                scaleX = s; scaleY = s
+                alpha = 1f - 0.5f * hu
+                // Fully covered (by the player, or by search's own background): not drawn at all.
+                if ((q > 0.999f && !sheet.water.dragging) || search.bg.value > 0.999f) alpha = 0f
+            },
             beyondViewportPageCount = 1, // the other page is already laid out: swipes never stutter
             key = { it },
         ) { page ->
@@ -173,9 +205,10 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
           }) {
             when (page) {
                 0 -> HomeScreen(
-                    contentBottom, onPlay = ::play, onOpenSearch = { searchOpen = true },
+                    contentBottom, onPlay = ::play, onOpenSearch = ::openSearch,
                     listState = homeList, topSignal = homeTopSignal,
                     onMessage = { toast = Toast(it) }, onQueue = ::enqueue,
+                    search = search,
                 )
                 else -> SavedScreen(contentBottom, onPlay = ::play, onQueue = ::enqueue, onRemoved = { v ->
                     toast = Toast("Removed from Saved", "Undo", onAction = { Library.toggleSaved(v) })
@@ -183,21 +216,13 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
             }
           }
         }
+        // The pages darken a little as the player rises over them.
+        if (np != null) Box(Modifier.fillMaxSize().graphicsLayer { alpha = 0.18f * playerOpen() }.background(Color.Black))
 
-        AnimatedVisibility(
-            visible = searchOpen,
-            enter = fadeIn(tween(160)) + slideInVertically(tween(220)) { it / 24 },
-            exit = fadeOut(tween(140)) + slideOutVertically(tween(180)) { it / 24 },
-        ) {
-            SearchScreen(contentBottom, onPlay = ::play, onQueue = ::enqueue, onClose = { keyboard?.hide(); searchOpen = false })
+        if (search.shown) {
+            SearchScreen(contentBottom, search, onPlay = ::play, onQueue = ::enqueue, onClose = ::closeSearch)
         }
-
-        if (!searchOpen) {
-            TabBar(tab, { pager.currentPage + pager.currentPageOffsetFraction }, Modifier.align(Alignment.BottomCenter)) { t ->
-                // Tapping Home while already on Home just glides back to the top (no reload).
-                if (t == Tab.Home && tab == Tab.Home) homeTopSignal++ else goTo(t)
-            }
-        }
+        SearchMorph(search)
 
         toast?.let { t ->
             ToastPill(t, Modifier.align(Alignment.BottomCenter).padding(bottom = contentBottom + 12.dp)) { toast = null }
@@ -206,29 +231,45 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
         np?.let { state ->
             PlayerSheet(
                 np = state, conn = conn, sheet = sheet, bottomBarHeight = bottomBar,
+                water = water, tabBarShown = !searchOpen,
                 onClosed = {
                     conn.close()
                     scope.launch { sheet.progress.snapTo(0f); sheet.dismiss.snapTo(0f) }
                 },
             )
         }
+
+        // The tab bar is the water's surface, so it sits over the mini player: whatever dips or
+        // sinks goes under it. It slides away as the player rises, and sinks while search is open.
+        TabBar(
+            tab, { pager.currentPage + pager.currentPageOffsetFraction }, water,
+            Modifier.align(Alignment.BottomCenter).graphicsLayer {
+                translationY = playerOpen() * (tabBarHeight.toPx() + 8.dp.toPx()) + search.bar.value * density.density
+            },
+        ) { t ->
+            // Tapping Home while already on Home just glides back to the top (no reload).
+            if (t == Tab.Home && tab == Tab.Home) homeTopSignal++ else goTo(t)
+        }
     }
     }
 
-    BackHandler(enabled = searchOpen && !sheet.isExpanded) { keyboard?.hide(); searchOpen = false }
+    BackHandler(enabled = searchOpen && !sheet.isExpanded) { closeSearch() }
     BackHandler(enabled = !searchOpen && tab != Tab.Home && !sheet.isExpanded) { goTo(Tab.Home) }
     // Predictive back drags the player down with your thumb, exactly like pulling it.
     PredictiveBackHandler(enabled = np != null && sheet.isExpanded) { events ->
+        sheet.water.dragStart()
         try {
             events.collect { e -> sheet.progress.snapTo(1f - e.progress * 0.4f) }
+            sheet.water.dragEnd()
             sheet.collapse()
         } catch (e: CancellationException) {
+            sheet.water.dragEnd()
             scope.launch { sheet.expand() } // gesture abandoned: spring back open
             throw e
         }
     }
     // With "Up next" open, Back closes just the queue.
-    BackHandler(enabled = np != null && sheet.isQueueOpen) { scope.launch { sheet.closeQueue() } }
+    BackHandler(enabled = np != null && sheet.isQueueOpen) { scope.launch { sheet.closeQueue(tapped = true) } }
 }
 
 @Composable
@@ -242,59 +283,6 @@ private fun StatusBarFollowsSheet(sheet: SheetState) {
                 isAppearanceLightStatusBars = !dark && !overDark
                 isAppearanceLightNavigationBars = !dark && !overDark
             }
-        }
-    }
-}
-
-@Composable
-private fun TabBar(selected: Tab, position: () -> Float, modifier: Modifier, onSelect: (Tab) -> Unit) {
-    val p = LocalPalette.current
-    val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
-    Column(modifier.fillMaxWidth().background(p.chrome)) {
-        Box(Modifier.fillMaxWidth().height(0.5.dp).background(p.separator))
-        Row(Modifier.fillMaxWidth().height(52.dp)) {
-            TabItem("Home", Icons.Home, Icons.HomeFill, selected == Tab.Home, { 1f - position().coerceIn(0f, 1f) }, Modifier.weight(1f)) { onSelect(Tab.Home) }
-            TabItem("Saved", Icons.Bookmark, Icons.BookmarkFill, selected == Tab.Saved, { position().coerceIn(0f, 1f) }, Modifier.weight(1f)) { onSelect(Tab.Saved) }
-        }
-        Spacer(Modifier.height(navBottom))
-    }
-}
-
-@Composable
-private fun TabItem(
-    label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    iconSelected: androidx.compose.ui.graphics.vector.ImageVector,
-    selected: Boolean,
-    amount: () -> Float, // 0..1: how "on" this tab is, following your finger during a swipe
-    modifier: Modifier,
-    onClick: () -> Unit,
-) {
-    val p = LocalPalette.current
-    // When a tab becomes active its icon dips and springs back, like a key being pressed.
-    val pop = remember { androidx.compose.animation.core.Animatable(1f) }
-    var first by remember { mutableStateOf(true) }
-    LaunchedEffect(selected) {
-        if (first) { first = false; return@LaunchedEffect }
-        if (selected) { pop.snapTo(0.78f); pop.animateTo(1f, app.earful.ui.theme.Motion.lively()) }
-    }
-    Column(
-        modifier.fillMaxSize().pressable(scaleTo = 0.9f, role = Role.Tab, label = label, onClick = onClick),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
-    ) {
-        Box(Modifier.graphicsLayer { scaleX = pop.value; scaleY = pop.value; translationY = (1f - pop.value) * 14f }) {
-            // Outline and filled icons cross-fade with the swipe, so the tab "fills in" as you go.
-            Icon(icon, p.secondary, size = 25.dp, contentDescription = label,
-                modifier = Modifier.graphicsLayer { alpha = 1f - amount() })
-            Icon(iconSelected, p.accent, size = 25.dp,
-                modifier = Modifier.graphicsLayer { alpha = amount() })
-        }
-        Spacer(Modifier.height(2.dp))
-        Box {
-            val style = Type.caption.copy(fontSize = androidx.compose.ui.unit.TextUnit(10.5f, androidx.compose.ui.unit.TextUnitType.Sp))
-            Text(label, style, color = p.secondary, modifier = Modifier.graphicsLayer { alpha = 1f - amount() })
-            Text(label, style, color = p.accent, modifier = Modifier.graphicsLayer { alpha = amount() })
         }
     }
 }
@@ -332,4 +320,3 @@ private fun ToastPill(t: Toast, modifier: Modifier, onDone: () -> Unit) {
         }
     }
 }
-

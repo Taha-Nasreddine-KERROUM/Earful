@@ -50,8 +50,11 @@ object Icons {
         "M14.2 4.5h2.6c.7 0 1.2.5 1.2 1.2v12.6c0 .7-.5 1.2-1.2 1.2h-2.6c-.7 0-1.2-.5-1.2-1.2V5.7c0-.7.5-1.2 1.2-1.2z" to null,
     )
     val Search = icon("search", "M10.6 3.8a6.8 6.8 0 1 0 0 13.6 6.8 6.8 0 0 0 0-13.6z" to 2f, "M15.6 15.6l4.6 4.6" to 2.2f)
-    val Bookmark = icon("bookmark", "M7.2 3.8h9.6c.7 0 1.2.5 1.2 1.2v15.2l-6-4-6 4V5c0-.7.5-1.2 1.2-1.2z" to 1.8f)
-    val BookmarkFill = icon("bookmark.fill", "M7.2 3h9.6C17.6 3 18.6 4 18.6 5v15.6c0 .8-.9 1.2-1.5.8L12 18l-5.1 3.4c-.6.4-1.5 0-1.5-.8V5c0-1.1 1-2 1.8-2z" to null)
+    /** The bookmark's outline and its filled silhouette (the glass the save button fills). */
+    const val BookmarkPath = "M7.2 3.8h9.6c.7 0 1.2.5 1.2 1.2v15.2l-6-4-6 4V5c0-.7.5-1.2 1.2-1.2z"
+    const val BookmarkFillPath = "M7.2 3h9.6C17.6 3 18.6 4 18.6 5v15.6c0 .8-.9 1.2-1.5.8L12 18l-5.1 3.4c-.6.4-1.5 0-1.5-.8V5c0-1.1 1-2 1.8-2z"
+    val Bookmark = icon("bookmark", BookmarkPath to 1.8f)
+    val BookmarkFill = icon("bookmark.fill", BookmarkFillPath to null)
     val Home = icon("house", "M3.8 10.4 12 3.8l8.2 6.6V19c0 .7-.5 1.2-1.2 1.2h-4.4v-5.6H9.4v5.6H5c-.7 0-1.2-.5-1.2-1.2z" to 1.8f)
     val HomeFill = icon("house.fill", "M3.2 10.6 11.2 4c.5-.4 1.1-.4 1.6 0l8 6.6c.3.2.5.6.5 1V19.4c0 .9-.7 1.6-1.6 1.6h-4.2v-6h-7v6H4.3c-.9 0-1.6-.7-1.6-1.6v-7.8c0-.4.2-.8.5-1z" to null)
     val Close = icon("xmark", "M6.5 6.5l11 11M17.5 6.5l-11 11" to 2f)

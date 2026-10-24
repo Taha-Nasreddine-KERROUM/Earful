@@ -4,7 +4,11 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitHorizontalTouchSlopOrCancellation
+import androidx.compose.foundation.gestures.horizontalDrag
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -40,8 +44,8 @@ import kotlin.math.sin
 private val Red = Color(0xFFFF3B30)
 
 /**
- * Swipe a row to the right to remove it, the same way as in Up next ("Drain"): red liquid follows
- * the finger in from the left with a rippling edge; let go past the line (or flick) and the red
+ * Swipe a row to the left to remove it, the same way as in Up next ("Drain"): red liquid follows
+ * the finger in from the right with a rippling edge; let go past the line (or flick) and the red
  * floods the row, then drains down out of sight while the rows below close the gap.
  *
  * [background] must be opaque: the row slides over the red.
@@ -75,7 +79,7 @@ fun SwipeToDrain(
     }
 
     suspend fun drainAway() {
-        dx.animateTo((rowW[0] + 6f * unit) / 0.86f + 2f * unit, tween(260, easing = Motion.inOutCubic))
+        dx.animateTo(-(rowW[0] + 6f * unit) / 0.86f - 2f * unit, tween(260, easing = Motion.inOutCubic))
         drain.animateTo(1f, tween(450, easing = Motion.inOutCubic))
         stirring = false
         remove()
@@ -93,24 +97,70 @@ fun SwipeToDrain(
                 rowW[0] = pl.width.toFloat()
                 layout(pl.width, (pl.height * (1f - drain.value)).roundToInt()) { pl.place(0, 0) }
             }
+            // (on the row's still frame, not on the moving row, so its own movement doesn't
+            // cancel out the finger's)
+            .pointerInput(Unit) {
+                val tracker = VelocityTracker()
+                var crossed = false
+                var finger = 0f
+                val give = 200.dp.toPx()
+                val commit = 80.dp.toPx()
+                // Follows the finger, then gets heavy past 200 dp.
+                fun shown(f: Float) = if (f < -give) -give + (f + give) * 0.3f else f
+                // Only a swipe to the left is ours; a swipe to the right is left to the pages
+                // (back to Home).
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var over0 = 0f
+                    val start = awaitHorizontalTouchSlopOrCancellation(down.id) { change, over ->
+                        if (over < 0f || dx.value < -0.5f) { change.consume(); over0 = over }
+                    } ?: return@awaitEachGesture
+                    tracker.resetTracking()
+                    val d = dx.value
+                    finger = if (d < -give) -give + (d + give) / 0.3f else d
+                    stirring = true
+                    fun follow(change: androidx.compose.ui.input.pointer.PointerInputChange, amount: Float) {
+                        tracker.addPosition(change.uptimeMillis, change.position)
+                        fingerV = fingerV * 0.6f + tracker.calculateVelocity().x * 0.4f
+                        finger = (finger + amount).coerceAtMost(0f)
+                        val next = shown(finger)
+                        val past = next < -commit
+                        if (past != crossed) { crossed = past; if (past) Haptics.threshold(view) }
+                        scope.launch { dx.snapTo(next) }
+                    }
+                    follow(start, over0)
+                    val ended = horizontalDrag(start.id) { change ->
+                        val amount = change.positionChange().x // (read before it's marked as used)
+                        change.consume()
+                        follow(change, amount)
+                    }
+                    val v = tracker.calculateVelocity().x
+                    fingerV = 0f
+                    crossed = false
+                    scope.launch {
+                        if (ended && (dx.value < -commit || v < -650.dp.toPx())) drainAway()
+                        else { dx.animateTo(0f, Motion.rowBack(), if (ended) v else 0f); stirring = false }
+                    }
+                }
+            }
     ) {
         Canvas(Modifier.matchParentSize()) {
             val w = size.width
             val h = size.height
             val d = drain.value
-            if (dx.value < 0.5f && d == 0f) return@Canvas
+            if (dx.value > -0.5f && d == 0f) return@Canvas
             val red = Path()
             if (d == 0f) {
                 val v = if (stirring && fingerV != 0f) fingerV else dx.velocity
                 val amp = (2.2f + (abs(v) / unit * 0.006f).coerceAtMost(7f)) * unit
-                val edge = -6f * unit + dx.value * 0.86f
-                red.moveTo(0f, 0f)
+                val edge = w + 6f * unit + dx.value * 0.86f
+                red.moveTo(w, 0f)
                 var y = 0f
                 while (y <= h) {
                     red.lineTo(edge + amp * sin(y / h * 2f * PI.toFloat() + phase), y)
                     y += 4f * unit
                 }
-                red.lineTo(0f, h)
+                red.lineTo(w, h)
                 red.close()
             } else {
                 // draining: the surface goes down, rippling less and less
@@ -125,10 +175,10 @@ fun SwipeToDrain(
             }
             drawPath(red, Red)
         }
-        Box(Modifier.matchParentSize().padding(start = 24.dp), contentAlignment = Alignment.CenterStart) {
+        Box(Modifier.matchParentSize().padding(end = 24.dp), contentAlignment = Alignment.CenterEnd) {
             Icon(Icons.Trash, Color.White, size = 22.dp, contentDescription = "Remove",
                 modifier = Modifier.graphicsLayer {
-                    val k = (dx.value / 70.dp.toPx()).coerceIn(0f, 1f)
+                    val k = (-dx.value / 70.dp.toPx()).coerceIn(0f, 1f)
                     alpha = k * (1f - drain.value * 1.6f).coerceIn(0f, 1f)
                     val s = 0.5f + 0.5f * k
                     scaleX = s; scaleY = s
@@ -138,42 +188,6 @@ fun SwipeToDrain(
             Modifier
                 .graphicsLayer { translationX = dx.value; alpha = if (drain.value > 0f) 0f else 1f }
                 .background(background)
-                .pointerInput(Unit) {
-                    val tracker = VelocityTracker()
-                    var crossed = false
-                    var finger = 0f
-                    val give = 200.dp.toPx()
-                    val commit = 80.dp.toPx()
-                    // Follows the finger, then gets heavy past 200 dp.
-                    fun shown(f: Float) = if (f > give) give + (f - give) * 0.3f else f
-                    detectHorizontalDragGestures(
-                        onDragStart = {
-                            tracker.resetTracking()
-                            val d = dx.value
-                            finger = if (d > give) give + (d - give) / 0.3f else d
-                            stirring = true
-                        },
-                        onDragEnd = {
-                            val v = tracker.calculateVelocity().x
-                            fingerV = 0f
-                            crossed = false
-                            scope.launch {
-                                if (dx.value > commit || v > 650.dp.toPx()) drainAway()
-                                else { dx.animateTo(0f, Motion.rowBack(), v); stirring = false }
-                            }
-                        },
-                        onDragCancel = { fingerV = 0f; scope.launch { dx.animateTo(0f, Motion.rowBack()); stirring = false } },
-                    ) { change, amount ->
-                        change.consume()
-                        tracker.addPosition(change.uptimeMillis, change.position)
-                        fingerV = fingerV * 0.6f + tracker.calculateVelocity().x * 0.4f
-                        finger = (finger + amount).coerceAtLeast(0f)
-                        val next = shown(finger)
-                        val past = next > commit
-                        if (past != crossed) { crossed = past; if (past) Haptics.threshold(view) }
-                        scope.launch { dx.snapTo(next) }
-                    }
-                }
         ) { content() }
     }
 }
