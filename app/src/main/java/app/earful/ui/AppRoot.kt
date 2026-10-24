@@ -28,6 +28,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -38,6 +39,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -108,22 +110,20 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     val imeInsets = WindowInsets.ime
     @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
     val imeTarget = WindowInsets.imeAnimationTarget
-    // The mini player rides the keyboard: the moment the keyboard starts to move (Android says
-    // where it will end up), the mini player sets off along the same curve and timing Android
-    // moves the keyboard with, so the two travel as one, without waiting for the keyboard's
-    // position to be reported frame by frame (late on some phones). As it arrives it bounces,
-    // as hard as it was moving, the same as landing after a minimise.
-    val keyboardRide = remember { androidx.compose.animation.core.Animatable(0f) }
+    // The mini player rides the keyboard, as one physical motion from the moment the keyboard
+    // starts to move (Android says where it will end up, so nothing waits for the keyboard's
+    // position to be reported frame by frame, which is late on some phones). It follows the
+    // keyboard's own curve and timing:
+    //  · going up it rests on the keyboard like a weight on a lift: pushed up with it, and when
+    //    the keyboard brakes it carries on a little by its own momentum and settles back on it;
+    //  · going down it rides the keyboard until it's nearly down, then drops the last bit by its
+    //    own momentum and dips a little below its place before settling, like landing after a
+    //    minimise.
+    // So it never stops before the bounce: the bounce is the end of the same movement, and its
+    // size comes from how far and fast it moved.
+    val keyboardRide = remember { mutableFloatStateOf(0f) } // px above the bottom edge
     LaunchedEffect(imeTarget) {
-        snapshotFlow { imeTarget.getBottom(density).toFloat() }.collectLatest { target ->
-            val from = keyboardRide.value
-            if (kotlin.math.abs(target - from) < 1f) return@collectLatest
-            keyboardRide.animateTo(target, tween(280, easing = androidx.compose.animation.core.CubicBezierEasing(0.2f, 0f, 0f, 1f)))
-            val moved = target - from
-            if (kotlin.math.abs(moved) > 24f * density.density && np != null && sheet.miniShowing) {
-                sheet.water.bump(up = moved > 0f, speed = kotlin.math.abs(moved) / 0.28f)
-            }
-        }
+        snapshotFlow { imeTarget.getBottom(density).toFloat() }.collectLatest { target -> rideKeyboard(keyboardRide, target) }
     }
     val tabBarHeight = 52.dp + navBottom
     val bottomBar by animateDpAsState(if (searchOpen) navBottom else tabBarHeight, label = "bar")
@@ -269,7 +269,11 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
                 np = state, conn = conn, sheet = sheet, bottomBarHeight = bottomBar,
                 water = water, tabBarShown = !searchOpen,
                 // In search, the mini player rides just above the keyboard, moving with it.
-                lift = { (keyboardRide.value - with(density) { bottomBar.toPx() }).coerceAtLeast(0f) },
+                lift = {
+                    val ride = keyboardRide.floatValue
+                    // above the dock it rides the keyboard; a dip below 0 is the landing bounce
+                    (ride - with(density) { bottomBar.toPx() }).coerceAtLeast(0f) + ride.coerceAtMost(0f)
+                },
                 onClosed = {
                     conn.close()
                     scope.launch { sheet.progress.snapTo(0f); sheet.dismiss.snapTo(0f) }
