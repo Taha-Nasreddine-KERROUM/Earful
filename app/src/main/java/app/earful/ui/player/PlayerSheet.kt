@@ -99,6 +99,7 @@ import app.earful.ui.theme.Motion
 import app.earful.ui.theme.Type
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.PI
@@ -455,6 +456,21 @@ class SheetWater {
         edge.step(dt, lift, stir, unit)
     }
 
+    /**
+     * The mini player was carried somewhere (riding the keyboard up or down) and has just stopped:
+     * like landing after a minimise, it carries on a little past its spot ([up] = upward) and
+     * floats back, the contents settling inside it. [speed] is how fast it was carried (px/s).
+     */
+    fun bump(up: Boolean, speed: Float) {
+        val push = (70f + 0.09f * speed / unit).coerceIn(70f, 240f)
+        pulseT = 0f
+        pulseA = (if (up) -2f else 2f) * push * unit / PULSE
+        dipOn = true
+        coV = 0f
+        coOn = true
+        wake++
+    }
+
     private fun touch(q: Float) {
         val lim = (6f + 40f * q) * unit
         val o = if (heavy && synced) lim * tanh((fy - (topOf(q) + dip)) / lim) else if (soft) so else 0f
@@ -536,6 +552,27 @@ fun PlayerSheet(
 
     // The water runs only while something moves.
     LaunchedEffect(sheet) { sheet.water.run(sheet.progress) }
+
+    // Riding the keyboard: when it has finished coming up (or going away), the mini player
+    // bounces like it does when it lands after a minimise.
+    LaunchedEffect(sheet) {
+        var prev = lift()
+        var prevT = System.nanoTime()
+        var from = prev
+        var peak = 0f
+        snapshotFlow { lift() }.collectLatest { v ->
+            val now = System.nanoTime()
+            val dt = (now - prevT) / 1e9f
+            if (peak == 0f) from = prev
+            if (dt > 0f) peak = max(peak, abs(v - prev) / dt)
+            prev = v; prevT = now
+            delay(70) // no more movement for a moment: the keyboard has arrived
+            val moved = v - from
+            val speed = peak
+            peak = 0f
+            if (abs(moved) > 24f * density.density && sheet.miniShowing) sheet.water.bump(up = moved > 0f, speed = speed)
+        }
+    }
 
     // Artwork breathes: full size while playing, settles back when paused.
     val artScale = animateFloatAsState(if (np.playing || np.waiting) 1f else 0.86f, Motion.lively(), label = "art")
