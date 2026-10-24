@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imeAnimationTarget
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -104,6 +105,8 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
 
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     val imeInsets = WindowInsets.ime
+    @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+    val imeTarget = WindowInsets.imeAnimationTarget
     val tabBarHeight = 52.dp + navBottom
     val bottomBar by animateDpAsState(if (searchOpen) navBottom else tabBarHeight, label = "bar")
     val contentBottom = bottomBar + if (np != null) 72.dp else 0.dp
@@ -250,6 +253,8 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
                 // In search, the mini player rides just above the keyboard, moving with it.
                 // (follows the keyboard all the way, also down again as search closes)
                 lift = { (imeInsets.getBottom(density) - with(density) { bottomBar.toPx() }).coerceAtLeast(0f) },
+                keyboard = { imeInsets.getBottom(density).toFloat() },
+                keyboardTarget = { imeTarget.getBottom(density).toFloat() },
                 onClosed = {
                     conn.close()
                     scope.launch { sheet.progress.snapTo(0f); sheet.dismiss.snapTo(0f) }

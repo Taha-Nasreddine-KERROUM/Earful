@@ -99,7 +99,6 @@ import app.earful.ui.theme.Motion
 import app.earful.ui.theme.Type
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.PI
@@ -518,6 +517,9 @@ fun PlayerSheet(
     onClosed: () -> Unit,
     /** How far above its usual place the mini player rides right now (px): on top of the keyboard. */
     lift: () -> Float = { 0f },
+    /** The keyboard's height right now, and where it's heading (px). */
+    keyboard: () -> Float = { 0f },
+    keyboardTarget: () -> Float = { 0f },
 ) {
     val density = LocalDensity.current
     val view = LocalView.current
@@ -553,24 +555,28 @@ fun PlayerSheet(
     // The water runs only while something moves.
     LaunchedEffect(sheet) { sheet.water.run(sheet.progress) }
 
-    // Riding the keyboard: when it has finished coming up (or going away), the mini player
-    // bounces like it does when it lands after a minimise.
+    // Riding the keyboard: on the very frame the keyboard arrives (all the way up, or all the
+    // way down), the mini player bounces like it does when it lands after a minimise, as hard as
+    // the keyboard was moving. Only the keyboard's own movement counts, so nothing waits.
     LaunchedEffect(sheet) {
-        var prev = lift()
-        var prevT = System.nanoTime()
+        var prev = keyboard()
+        var prevT = 0L
         var from = prev
         var peak = 0f
-        snapshotFlow { lift() }.collectLatest { v ->
+        var moving = false
+        snapshotFlow { keyboard() to keyboardTarget() }.collect { (v, target) ->
             val now = System.nanoTime()
-            val dt = (now - prevT) / 1e9f
-            if (peak == 0f) from = prev
-            if (dt > 0f) peak = max(peak, abs(v - prev) / dt)
+            if (v != prev) {
+                if (!moving) { moving = true; from = prev; peak = 0f }
+                val dt = if (prevT == 0L) 0f else (now - prevT) / 1e9f
+                if (dt > 0f) peak = max(peak, abs(v - prev) / dt)
+            }
             prev = v; prevT = now
-            delay(70) // no more movement for a moment: the keyboard has arrived
-            val moved = v - from
-            val speed = peak
-            peak = 0f
-            if (abs(moved) > 24f * density.density && sheet.miniShowing) sheet.water.bump(up = moved > 0f, speed = speed)
+            if (moving && abs(v - target) < 1f) {
+                moving = false
+                val moved = v - from // + = it came up
+                if (abs(moved) > 24f * density.density && sheet.miniShowing) sheet.water.bump(up = moved > 0f, speed = peak)
+            }
         }
     }
 
