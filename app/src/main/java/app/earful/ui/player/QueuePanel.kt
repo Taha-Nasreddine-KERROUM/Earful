@@ -428,7 +428,7 @@ private fun QueueRow(
                         var finger = 0f
                         val give = 200.dp.toPx()
                         val commit = 80.dp.toPx()
-                        val early = 3.dp.toPx()
+                        val early = 4.dp.toPx() // decided well before anything else would react (8 dp)
                         // Follows the finger, then gets heavy past 200 dp.
                         fun shown(f: Float) = if (f < -give) -give + (f + give) * 0.3f else f
                         fun follow(change: androidx.compose.ui.input.pointer.PointerInputChange, amount: Float) {
@@ -453,7 +453,9 @@ private fun QueueRow(
                                 if (!ch.pressed || ch.isConsumed) return@awaitEachGesture
                                 total += ch.positionChange()
                                 if (total.getDistance() >= early) {
-                                    val sideways = abs(total.x) > abs(total.y)
+                                    // A thumb swipe often starts at an angle: anything up to ~60°
+                                    // from flat counts as sideways.
+                                    val sideways = abs(total.x) > abs(total.y) * 0.55f
                                     if (sideways && (total.x < 0f || dx.value < -0.5f)) { ch.consume(); break }
                                     return@awaitEachGesture
                                 }

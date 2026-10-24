@@ -742,6 +742,9 @@ fun PlayerSheet(
                         var pull = 0f // how far the finger has pulled the mini player down (px)
                         val startQ = sheet.queue.value
                         val afterSlop = awaitVerticalTouchSlopOrCancellation(down.id) { change, over ->
+                            // More sideways than up/down (a swipe on a queue row, say): not ours.
+                            val moved = change.position - down.position
+                            if (startP > 0.98f && abs(moved.x) > abs(moved.y) * 0.55f) return@awaitVerticalTouchSlopOrCancellation
                             change.consume()
                             dismissMode = startP < 0.02f && over > 0
                             // Fully open: swipe up for "Up next"; with it open, swipe down closes it first.
