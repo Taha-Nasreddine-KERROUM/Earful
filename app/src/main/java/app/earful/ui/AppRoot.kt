@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -102,6 +103,8 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     val ctx = LocalContext.current
 
     val navBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val navBottomPx = with(density) { navBottom.roundToPx() }
+    val imeInsets = WindowInsets.ime
     val tabBarHeight = 52.dp + navBottom
     val bottomBar by animateDpAsState(if (searchOpen) navBottom else tabBarHeight, label = "bar")
     val contentBottom = bottomBar + if (np != null) 72.dp else 0.dp
@@ -245,6 +248,8 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
             PlayerSheet(
                 np = state, conn = conn, sheet = sheet, bottomBarHeight = bottomBar,
                 water = water, tabBarShown = !searchOpen,
+                // In search, the mini player rides just above the keyboard, moving with it.
+                lift = { if (searchOpen) (imeInsets.getBottom(density) - navBottomPx).coerceAtLeast(0).toFloat() else 0f },
                 onClosed = {
                     conn.close()
                     scope.launch { sheet.progress.snapTo(0f); sheet.dismiss.snapTo(0f) }

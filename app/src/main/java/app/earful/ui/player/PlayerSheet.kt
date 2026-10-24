@@ -500,6 +500,8 @@ fun PlayerSheet(
     water: Water,
     tabBarShown: Boolean,
     onClosed: () -> Unit,
+    /** How far above its usual place the mini player rides right now (px): on top of the keyboard. */
+    lift: () -> Float = { 0f },
 ) {
     val density = LocalDensity.current
     val view = LocalView.current
@@ -559,7 +561,7 @@ fun PlayerSheet(
         w.range = dragRange
         sheet.pageH = H
         sheet.miniTop = collapsedTop
-        w.topOf = { q -> (if (sheet.direct) (1f - q) * H else lerp(collapsedTop, 0f, q)) + sheet.dismiss.value }
+        w.topOf = { q -> (if (sheet.direct) (1f - q) * H else lerp(collapsedTop - lift(), 0f, q)) + sheet.dismiss.value }
         w.onLand = { push ->
             // The tab bar's surface ripples where the mini player lands on it.
             if (tabBarShown) water.ripple(W / 2, (2.5f + push / 60f).coerceIn(3f, 7f) * unit, 70f * unit, 11f * unit, 1.1f)
@@ -631,7 +633,7 @@ fun PlayerSheet(
                     val p = pNow()
                     w.frame // moves with the water (the landing dip)
                     val direct = sheet.direct // opened from a list: a full page rising from the bottom edge
-                    val top = (if (direct) (1f - p) * H else lerp(collapsedTop, 0f, p)) + sheet.dismiss.value + w.dip
+                    val top = (if (direct) (1f - p) * H else lerp(collapsedTop - lift(), 0f, p)) + sheet.dismiss.value + w.dip
                     val side = if (direct) 0f else lerp(margin, 0f, p)
                     val pl = m.measure(Constraints.fixed((W - side * 2f).roundToInt(), (if (direct) H else lerp(miniH, H, p)).roundToInt()))
                     layout(pl.width, pl.height) {
