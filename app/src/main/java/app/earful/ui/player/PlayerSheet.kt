@@ -527,6 +527,15 @@ fun PlayerSheet(
 
     val downloads by AudioCache.progress.collectAsStateWithLifecycle()
     val downloaded = downloads[np.video.id] ?: 0f
+    // "Available offline" is news only at the moment the download finishes while you're here:
+    // it shows for 2 s, then goes. A video that's already saved (or reopened later) doesn't say it.
+    val complete = downloaded >= 1f
+    var wasSaving by remember(np.video.id) { mutableStateOf(!complete) }
+    var justSaved by remember(np.video.id) { mutableStateOf(false) }
+    LaunchedEffect(np.video.id, complete) {
+        if (!complete) wasSaving = true
+        else if (wasSaving) { wasSaving = false; justSaved = true; delay(2000); justSaved = false }
+    }
     val queue by conn.queue.collectAsStateWithLifecycle()
     // The queue only exists (button, swipe-up panel, left/right swipes) once there are 2+ videos.
     val hasQueue = queue.entries.size > 1
@@ -869,7 +878,7 @@ fun PlayerSheet(
                             ).wrapContentHeight(Alignment.CenterVertically)
                         }
                         NowPlayingControls(
-                            np = np, conn = conn, positionMs = pos, downloaded = downloaded,
+                            np = np, conn = conn, positionMs = pos, downloaded = downloaded, justSaved = justSaved,
                             error = error, saved = saved, onToggleSave = { Library.toggleSaved(np.video) },
                             upcoming = queue.upcoming,
                             showUpNext = hasQueue,
@@ -942,6 +951,7 @@ fun PlayerSheet(
                     downloads = downloads,
                     onJump = { conn.jumpTo(it) },
                     onRemove = { conn.remove(it) },
+                    playing = np.playing,
                     onClose = { scope.launch { sheet.closeQueue(tapped = true) } },
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
@@ -1000,6 +1010,7 @@ private fun NowPlayingControls(
     conn: PlayerConnection,
     positionMs: Long,
     downloaded: Float,
+    justSaved: Boolean,
     error: String?,
     saved: Boolean,
     onToggleSave: () -> Unit,
@@ -1043,7 +1054,7 @@ private fun NowPlayingControls(
                 SkipButton(forward = true) { conn.seekBy(10_000) }
             }
             Spacer(Modifier.height(20.dp))
-            StatusLine(np, downloaded, error, onRetry = { conn.retry(np.video) })
+            StatusLine(np, downloaded, justSaved, error, onRetry = { conn.retry(np.video) })
             Spacer(Modifier.height(6.dp))
             // Space is always reserved, so nothing shifts when the button fades in.
             val upNextAlpha by animateFloatAsState(if (showUpNext) 1f else 0f, tween(250), label = "upnext")
@@ -1057,15 +1068,11 @@ private fun NowPlayingControls(
 
 /** One line that answers "can I lose signal now?" — the anxiety this app exists to remove. */
 @Composable
-private fun StatusLine(np: NowPlaying, downloaded: Float, error: String?, onRetry: () -> Unit) {
+private fun StatusLine(np: NowPlaying, downloaded: Float, justSaved: Boolean, error: String?, onRetry: () -> Unit) {
     val dim = Color.White.copy(alpha = 0.55f)
-    // "Available offline" is reassurance, not decoration: say it, then get out of the way.
     val complete = downloaded >= 1f
-    var offlineShown by remember(np.video.id) { mutableStateOf(true) }
-    LaunchedEffect(np.video.id, complete) {
-        if (complete) { offlineShown = true; delay(3500); offlineShown = false }
-    }
-    val offlineAlpha by animateFloatAsState(if (offlineShown) 1f else 0f, tween(600), label = "offline")
+    // "Available offline": only right as the download finishes (2 s), fading in and out.
+    val offlineAlpha by animateFloatAsState(if (justSaved) 1f else 0f, tween(if (justSaved) 250 else 500), label = "offline")
     Row(
         Modifier.fillMaxWidth().height(28.dp),
         horizontalArrangement = Arrangement.Center,
@@ -1082,12 +1089,12 @@ private fun StatusLine(np: NowPlaying, downloaded: Float, error: String?, onRetr
                         .clickable(onClick = onRetry).padding(horizontal = 12.dp, vertical = 5.dp)
                 ) { Text("Try again", Type.captionStrong, color = Color.White) }
             }
-            complete -> Row(Modifier.graphicsLayer { alpha = offlineAlpha }, verticalAlignment = Alignment.CenterVertically) {
+            complete && (justSaved || offlineAlpha > 0.01f) -> Row(Modifier.graphicsLayer { alpha = offlineAlpha }, verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Check, dim, size = 15.dp)
                 Spacer(Modifier.width(6.dp))
                 Text("Available offline", Type.footnote, color = dim)
             }
-            downloaded > 0f -> Text("Saving for offline · ${(downloaded * 100).toInt()}%", Type.footnote.copy(fontFeatureSettings = "tnum"), color = dim)
+            !complete && downloaded > 0f -> Text("Saving for offline · ${(downloaded * 100).toInt()}%", Type.footnote.copy(fontFeatureSettings = "tnum"), color = dim)
             np.waiting -> Text("Loading…", Type.footnote, color = dim)
             np.ended -> Text("Finished · double‑tap left to go back", Type.footnote, color = dim)
         }

@@ -45,6 +45,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -102,7 +103,6 @@ class QueueRowsMotion {
 }
 
 private val PanelBg = Color(0xF0161618)
-private val RowBg = Color(0xFF161618)
 private val Red = Color(0xFFFF3B30)
 
 /**
@@ -121,6 +121,8 @@ fun QueuePanel(
     panelHeight: Float,
     navBottom: Dp,
     downloads: Map<String, Float>,
+    /** The video playing now is actually playing (its little bars move). */
+    playing: Boolean = false,
     onJump: (Int) -> Unit,
     onRemove: (Int) -> Unit,
     onClose: () -> Unit,
@@ -264,6 +266,7 @@ fun QueuePanel(
             itemsIndexed(queue.entries, key = { _, e -> e.uid }) { i, e ->
                 QueueRow(
                     entry = e,
+                    playing = playing,
                     download = if (e.index == queue.currentIndex + 1) downloads[e.video.id] else null,
                     rows = rows,
                     order = { i - list.firstVisibleItemIndex },
@@ -291,6 +294,7 @@ fun QueuePanel(
 @Composable
 private fun QueueRow(
     entry: QueueEntry,
+    playing: Boolean,
     download: Float?,
     rows: QueueRowsMotion,
     order: () -> Int,
@@ -360,11 +364,11 @@ private fun QueueRow(
     ) {
         if (!entry.current) {
             // The red, as a liquid.
-            Canvas(Modifier.fillMaxSize()) {
+            Canvas(Modifier.fillMaxSize().clipToBounds()) {
                 val w = size.width
                 val h = size.height
                 val d = drain.value
-                if (dx.value > -0.5f && d == 0f) return@Canvas
+                if ((dx.value > -0.5f && d == 0f) || d >= 0.999f) return@Canvas
                 val red = Path()
                 if (d == 0f) {
                     val v = if (stirring && fingerV != 0f) fingerV else dx.velocity
@@ -395,7 +399,9 @@ private fun QueueRow(
                 Icon(Icons.Trash, Color.White, size = 22.dp, contentDescription = "Remove",
                     modifier = Modifier.graphicsLayer {
                         val k = (-dx.value / 70.dp.toPx()).coerceIn(0f, 1f)
-                        alpha = k * (1f - drain.value * 1.6f).coerceIn(0f, 1f)
+                        // (the row is see-through: only show it once the row has moved off its spot)
+                        val clear = ((-dx.value - 46.dp.toPx()) / 14.dp.toPx()).coerceIn(0f, 1f)
+                        alpha = k * clear * (1f - drain.value * 1.6f).coerceIn(0f, 1f)
                         val s = 0.5f + 0.5f * k
                         scaleX = s; scaleY = s
                     })
@@ -404,8 +410,9 @@ private fun QueueRow(
         Row(
             Modifier
                 .fillMaxSize()
+                // Straight on the panel (no strip of its own): the red only ever fills the part the
+                // row has moved out of, so nothing shows through it.
                 .graphicsLayer { translationX = dx.value; alpha = if (drain.value > 0f) 0f else 1f }
-                .background(RowBg)
                 .then(
                     if (entry.current) Modifier else Modifier.pointerInput(entry.uid) {
                         val tracker = VelocityTracker()
@@ -468,19 +475,45 @@ private fun QueueRow(
                 )
             }
             when {
-                entry.current -> NowPlayingBars()
+                entry.current -> NowPlayingBars(playing)
                 download != null -> DownloadDot(download)
             }
         }
     }
 }
 
-/** Three small bars: "this one is playing". Static — no animation burning frames off-screen. */
+/**
+ * Three small bars: "this one is playing". They bob like a level meter while it plays and sink
+ * back to rest when it's paused. Only runs frames while it's playing and Up next is open.
+ */
 @Composable
-private fun NowPlayingBars() {
+private fun NowPlayingBars(playing: Boolean) {
+    val swing = remember { Animatable(if (playing) 1f else 0f) }
+    var t by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(playing) {
+        if (playing) {
+            launch { swing.animateTo(1f, tween(260)) }
+            var last = 0L
+            while (true) withFrameNanos { now ->
+                if (last != 0L) t += (now - last) / 1e9f
+                last = now
+            }
+        } else swing.animateTo(0f, tween(320))
+    }
+    val rest = floatArrayOf(8f / 14f, 1f, 10f / 14f)
+    val speed = floatArrayOf(7.1f, 9.4f, 8.2f)
+    val offset = floatArrayOf(0f, 1.9f, 3.7f)
     Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.Bottom, modifier = Modifier.height(14.dp)) {
-        listOf(8, 14, 10).forEach { h ->
-            Box(Modifier.width(3.dp).height(h.dp).clip(RoundedCornerShape(1.5.dp)).background(Color(0xFFFF6482)))
+        for (i in 0..2) {
+            Box(
+                Modifier.width(3.dp).height(14.dp)
+                    .graphicsLayer {
+                        val moving = 0.3f + 0.7f * abs(sin(t * speed[i] + offset[i]))
+                        scaleY = rest[i] + (moving - rest[i]) * swing.value
+                        transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0.5f, 1f)
+                    }
+                    .clip(RoundedCornerShape(1.5.dp)).background(Color(0xFFFF6482))
+            )
         }
     }
 }
