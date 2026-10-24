@@ -158,12 +158,21 @@ class SheetState {
         private set
     internal var pageH = 1f
     internal var miniTop = 1f
+    /** Sinks the mini player under the tab bar (set by the sheet, which knows where things are). */
+    internal var sinkAway: (suspend () -> Unit)? = null
+
+    /** The mini player is showing (docked, not being moved). */
+    val miniShowing get() = progress.value < 0.02f && progress.targetValue == 0f && !direct && dismiss.value < 1f
+
+    /** Another video is on its way: the mini player sinks away under the tab bar first. */
+    suspend fun makeWay() { sinkAway?.invoke() }
 
     suspend fun openDirect() {
         if (progress.value > 0.5f && progress.targetValue == 1f) { expand(); return }
         direct = true
         try {
             progress.snapTo(0f)
+            dismiss.snapTo(0f)
             expand()
         } finally {
             leaveDirect()
@@ -596,23 +605,25 @@ fun PlayerSheet(
 
         // Closing the video: it lifts a little, then sinks under the tab bar, which ripples.
         // One time in twelve, the water throws up a crown of drops.
-        fun sink() = scope.launch {
+        // [quick]: making way for another video, a little faster and never with the splash.
+        suspend fun sinkDown(quick: Boolean = false) {
             val start = sheet.dismiss.value
-            sheet.dismiss.animateTo(start - 6f * unit, tween(140, easing = Motion.outCubic))
-            val lucky = Random.nextInt(12) == 0
+            sheet.dismiss.animateTo(start - 6f * unit, tween(if (quick) 110 else 140, easing = Motion.outCubic))
+            val lucky = !quick && Random.nextInt(12) == 0
             var touched = false
-            sheet.dismiss.animateTo(start - 6f * unit + miniH + margin + 20f * unit, tween(500, easing = Motion.inCubic)) {
+            sheet.dismiss.animateTo(start - 6f * unit + miniH + margin + 20f * unit, tween(if (quick) 380 else 500, easing = Motion.inCubic)) {
                 if (!touched && value > margin + 6f * unit) {
                     touched = true
                     if (tabBarShown) {
-                        water.ripple(W / 2, 9f * unit, 90f * unit, 11f * unit, 1.3f)
+                        water.ripple(W / 2, (if (quick) 7f else 9f) * unit, 90f * unit, 11f * unit, 1.3f)
                         val side = lerp(margin, 0f, pNow())
                         if (lucky) water.splash(side, W - side, unit)
                     }
                 }
             }
-            onClosed()
         }
+        fun sink() = scope.launch { sinkDown(); onClosed() }
+        sheet.sinkAway = { sinkDown(quick = true) }
 
         Box(
             Modifier

@@ -149,11 +149,19 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     val notice by PlaybackEvents.notice.collectAsStateWithLifecycle()
     LaunchedEffect(notice) { notice?.let { n -> toast = Toast(n.text, n.action, onAction = n.onAction) } }
 
+    var playing by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     fun play(v: Video) {
         keyboard?.hide()
-        conn.play(v)
-        // Straight to the full page (the mini player only shows once you minimise it).
-        scope.launch { sheet.dismiss.snapTo(0f); sheet.openDirect() }
+        // A different video while the mini player is showing: it sinks away under the tab bar
+        // first (still showing what was playing), then the new one's page rises.
+        val makeWay = np != null && np?.video?.id != v.id && sheet.miniShowing
+        playing?.cancel()
+        playing = scope.launch {
+            if (makeWay) sheet.makeWay()
+            conn.play(v)
+            // Straight to the full page (the mini player only shows once you minimise it).
+            sheet.openDirect()
+        }
     }
 
     LaunchedEffect(signals.playRequest) { signals.playRequest?.let { play(it); signals.playRequest = null } }
