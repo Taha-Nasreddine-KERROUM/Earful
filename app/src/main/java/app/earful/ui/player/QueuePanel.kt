@@ -100,6 +100,16 @@ class QueueRowsMotion {
     /** 0 = rows in place, 1 = sunk away (faded out, 20 dp lower). */
     val out = Animatable(0f)
 
+    // ---- the queue and its rows never move at the same time ----
+    /** A finger is on a row and it isn't clear yet whether it's swiping sideways. */
+    @Volatile var rowHeld = false
+    /** A row is being swiped away (or draining): the queue holds perfectly still meanwhile. */
+    var deleting by mutableStateOf(false)
+    /** The queue must not move now. */
+    val frozen get() = rowHeld || deleting
+    /** The queue is fully open and still: only then can a row be swiped away. */
+    var panelStill: () -> Boolean = { true }
+
     fun enter() { entering = true }
     fun entered() { entering = false }
     suspend fun sink() = out.animateTo(1f, tween(200, easing = Motion.inCubic))
@@ -188,6 +198,7 @@ fun QueuePanel(
     val nested = remember(panelHeight) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (rows.frozen) return Offset.Zero // a row is being swiped: the queue stays put
                 if (available.y < 0 && open.value < 1f && source == NestedScrollSource.UserInput) {
                     val before = open.value
                     val next = (before - available.y / panelHeight).coerceAtMost(1f)
@@ -197,6 +208,7 @@ fun QueuePanel(
                 return Offset.Zero
             }
             override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
+                if (rows.frozen) return Offset.Zero
                 if (available.y > 0 && source == NestedScrollSource.UserInput) {
                     scope.launch { open.snapTo((open.value - available.y / panelHeight).coerceAtLeast(0f)) }
                     return Offset(0f, available.y)
@@ -204,11 +216,14 @@ fun QueuePanel(
                 return Offset.Zero
             }
             override suspend fun onPreFling(available: Velocity): Velocity {
+                if (rows.frozen) return Velocity.Zero
                 if (open.value < 1f) { settle(available.y); return available }
                 return Velocity.Zero
             }
         }
     }
+
+    rows.panelStill = { !open.isRunning && open.value > 0.999f }
 
     LaunchedEffect(queue.currentIndex) {
         if (queue.currentIndex >= 0 && open.value < 0.05f) list.scrollToItem((queue.currentIndex - 1).coerceAtLeast(0))
@@ -267,6 +282,7 @@ fun QueuePanel(
         LazyColumn(
             state = list,
             modifier = Modifier.fillMaxSize().nestedScroll(nested),
+            userScrollEnabled = !rows.deleting,
             contentPadding = PaddingValues(bottom = navBottom + 16.dp),
         ) {
             itemsIndexed(queue.entries, key = { _, e -> e.uid }) { i, e ->
@@ -442,6 +458,12 @@ private fun QueueRow(
                         }
                         awaitEachGesture {
                             val down = awaitFirstDown(requireUnconsumed = false)
+                            // The queue is moving (pulled, opening, closing): no deleting now.
+                            if (!rows.panelStill()) return@awaitEachGesture
+                            // From the touch on, the queue holds still until it's clear this isn't a
+                            // sideways swipe.
+                            rows.rowHeld = true
+                            try {
                             // Decide in the first few pixels: more sideways than up/down (and to the
                             // left, or the row is already out) is a swipe, and it's ours from there:
                             // the panel and the list never see it, so nothing slides down. Up/down
@@ -456,7 +478,7 @@ private fun QueueRow(
                                     // A thumb swipe often starts at an angle: anything up to ~60°
                                     // from flat counts as sideways.
                                     val sideways = abs(total.x) > abs(total.y) * 0.55f
-                                    if (sideways && (total.x < 0f || dx.value < -0.5f)) { ch.consume(); break }
+                                    if (sideways && (total.x < 0f || dx.value < -0.5f)) { ch.consume(); rows.deleting = true; break }
                                     return@awaitEachGesture
                                 }
                             }
@@ -474,8 +496,15 @@ private fun QueueRow(
                             fingerV = 0f
                             crossed = false
                             scope.launch {
-                                if (ended && (dx.value < -commit || v < -650.dp.toPx())) drainAway()
-                                else { dx.animateTo(0f, Motion.rowBack(), if (ended) v else 0f); stirring = false }
+                                try {
+                                    if (ended && (dx.value < -commit || v < -650.dp.toPx())) drainAway()
+                                    else { dx.animateTo(0f, Motion.rowBack(), if (ended) v else 0f); stirring = false }
+                                } finally {
+                                    rows.deleting = false // done: the queue can move again
+                                }
+                            }
+                            } finally {
+                                rows.rowHeld = false
                             }
                         }
                     }

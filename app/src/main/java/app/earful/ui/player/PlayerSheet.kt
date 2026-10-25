@@ -742,6 +742,8 @@ fun PlayerSheet(
                         var pull = 0f // how far the finger has pulled the mini player down (px)
                         val startQ = sheet.queue.value
                         val afterSlop = awaitVerticalTouchSlopOrCancellation(down.id) { change, over ->
+                            // A queue row is being touched or swiped away: the queue stays put.
+                            if (sheet.queueRows.frozen) return@awaitVerticalTouchSlopOrCancellation
                             // More sideways than up/down (a swipe on a queue row, say): not ours.
                             val moved = change.position - down.position
                             if (startP > 0.98f && abs(moved.x) > abs(moved.y) * 0.55f) return@awaitVerticalTouchSlopOrCancellation
@@ -758,6 +760,7 @@ fun PlayerSheet(
                         val closeAt = 26.dp.toPx()
                         fun apply(dy: Float) {
                             if (queueMode) {
+                                if (sheet.queueRows.frozen) return // a row is being swiped away
                                 scope.launch { sheet.queue.snapTo((sheet.queue.value - dy / queueRange).coerceIn(0f, 1f)) }
                             } else if (dismissMode) {
                                 // Follows the finger, then gets heavier past 60 dp.
