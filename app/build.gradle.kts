@@ -77,6 +77,9 @@ configure<ApplicationExtension> {
 dependencies {
     // YouTube data (search, home shelves, audio stream URLs) — no Google account, no ads.
     implementation("com.github.TeamNewPipe:NewPipeExtractor:e8f89145a830b4d6cae32412007f24ea8b36c73a")
+    // The JSON reader NewPipeExtractor uses; the channel page talks to it directly (for "Popular"),
+    // so it has to be on the compile path too, not only at run time.
+    implementation("com.github.TeamNewPipe:nanojson:e9d656ddb49a412a5a0a5d5ef20ca7ef09549996")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
 
     // Playback
