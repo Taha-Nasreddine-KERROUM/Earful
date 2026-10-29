@@ -242,7 +242,7 @@ fun HomeScreen(
                     .onPlaced { search.anchor = it } // read only while the morph runs: no work per frame
                     .graphicsLayer {
                         scaleX = search.dip.value; scaleY = search.dip.value
-                        alpha = if (search.morphing || search.shown) 0f else 1f
+                        alpha = if (search.morphing || (search.shown && search.morph.value > 0.5f)) 0f else 1f
                     }
                     .pressable(scaleTo = 0.85f, label = "Search", onClick = onOpenSearch),
                 contentAlignment = Alignment.Center,

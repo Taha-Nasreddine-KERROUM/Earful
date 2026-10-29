@@ -185,6 +185,9 @@ class PlayerConnection(private val context: Context) {
 
     fun seekTo(ms: Long) = withController { c -> c.seekTo(ms.coerceAtLeast(0)) }
 
+    /** Listening live but behind: back to what's happening now. */
+    fun goLive() = withController { c -> c.seekToDefaultPosition(); c.play() }
+
     fun positionMs(): Long = controller?.currentPosition ?: 0L
 
     /** Closing the player: stop, forget the queue, delete every downloaded file. */

@@ -47,6 +47,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -99,6 +100,12 @@ import app.earful.ui.components.Icons
 import app.earful.ui.components.RemoteImage
 import app.earful.ui.components.SaveButton
 import app.earful.ui.components.Text
+import app.earful.ui.components.pressable
+import app.earful.ui.hole.Hole
+import app.earful.ui.hole.HoleLayer
+import app.earful.ui.hole.LocalHoleLayer
+import app.earful.ui.hole.eatable
+import androidx.compose.runtime.CompositionLocalProvider
 import app.earful.ui.components.TideShape
 import app.earful.ui.components.Water
 import app.earful.ui.theme.LocalPalette
@@ -107,6 +114,7 @@ import app.earful.ui.theme.Type
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.launch
 import kotlin.math.PI
 import kotlin.math.abs
@@ -164,6 +172,7 @@ class SheetState {
     var direct by mutableStateOf(false)
         private set
     internal var pageH = 1f
+    internal var pageW = 1f
     internal var miniTop = 1f
     /** Sinks the mini player under the tab bar (set by the sheet, which knows where things are). */
     internal var sinkAway: (suspend () -> Unit)? = null
@@ -549,11 +558,39 @@ fun PlayerSheet(
     LaunchedEffect(hasQueue) { if (!hasQueue && sheet.queue.value > 0f) sheet.closeQueue() }
     // Horizontal swipe on Now Playing: the artwork follows your finger to the next/previous video.
     val swipe = remember { Animatable(0f) }
+    // The video the mini player and the artwork show. It trails the real one only while the next
+    // video in the queue slides in on the mini player by itself (the one that ended slides out
+    // to the left first, exactly like swiping to it).
+    var shownVideo by remember { mutableStateOf(np.video) }
+    var swiped by remember { mutableStateOf(false) } // a finger made this change: already slid
+    val queueNow by rememberUpdatedState(queue)
+    LaunchedEffect(np.video.id) {
+        val old = shownVideo
+        val new = np.video
+        if (old.id == new.id) { shownVideo = new; return@LaunchedEffect }
+        val entries = queueNow.entries
+        val from = entries.indexOfFirst { it.video.id == old.id }
+        val to = entries.indexOfFirst { it.current }
+        val mini = sheet.progress.value < 0.01f && !sheet.direct && sheet.dismiss.value == 0f
+        if (swiped || !mini || from < 0 || to < 0 || from == to || swipe.isRunning) {
+            swiped = false
+            shownVideo = new
+            return@LaunchedEffect
+        }
+        val W = sheet.pageW.coerceAtLeast(1f)
+        val forward = to > from
+        swipe.animateTo(if (forward) -W else W, tween(260, easing = Motion.inCubic))
+        shownVideo = new
+        swipe.snapTo(if (forward) W * 0.35f else -W * 0.35f)
+        swipe.animateTo(0f, Motion.sheet())
+    }
+    // Everything else about the video (title aside) is always the real one.
+    val shownNp = if (shownVideo.id == np.video.id) np else np.copy(video = shownVideo)
     // Replaying the last video (the rewind plays over the picture, the bar and the button).
     val rewind = remember { Rewind() }
     // The picture's real shape (YouTube gives each video's width and height); 16:9 until known.
     val shapes by VideoShapes.map.collectAsStateWithLifecycle()
-    val artShape = animateFloatAsState(shapes[np.video.id] ?: VideoShapes.WIDE, Motion.spread(), label = "shape")
+    val artShape = animateFloatAsState(shapes[shownVideo.id] ?: VideoShapes.WIDE, Motion.spread(), label = "shape")
     val error by PlaybackEvents.error.collectAsStateWithLifecycle()
     val savedList by Library.saved.collectAsStateWithLifecycle()
     val saved = savedList.any { it.id == np.video.id }
@@ -572,6 +609,14 @@ fun PlayerSheet(
 
     // The water runs only while something moves.
     LaunchedEffect(sheet) { sheet.water.run(sheet.progress) }
+
+    // The black hole forces Up next open before it eats it, and closes it again after.
+    val hasQueueNow by rememberUpdatedState(hasQueue)
+    LaunchedEffect(sheet) {
+        Hole.hasQueue = { hasQueueNow }
+        Hole.openQueue = { sheet.openQueue(tapped = true) }
+        Hole.closeQueue = { sheet.closeQueue(tapped = true) }
+    }
 
     // Artwork breathes: full size while playing, settles back when paused.
     val artScale = animateFloatAsState(if (np.playing || np.waiting) 1f else 0.86f, Motion.lively(), label = "art")
@@ -596,6 +641,7 @@ fun PlayerSheet(
         w.unit = unit
         w.range = dragRange
         sheet.pageH = H
+        sheet.pageW = W
         sheet.miniTop = collapsedTop
         w.topOf = { q -> (if (sheet.direct) (1f - q) * H else lerp(collapsedTop - lift(), 0f, q)) + sheet.dismiss.value }
         w.onLand = { push ->
@@ -616,6 +662,8 @@ fun PlayerSheet(
         val showFull by remember { derivedStateOf { sheet.progress.value > 0.2f || sheet.rising || sheet.water.dragging } }
         val fullyOpen by remember { derivedStateOf { sheet.progress.value > 0.99f } }
         val queueShown by remember { derivedStateOf { sheet.queue.value > 0.001f && sheet.progress.value > 0.9f } }
+        // Minimised (or closed) while the black hole is open: it stops and gives everything back.
+        LaunchedEffect(fullyOpen) { if (!fullyOpen) Hole.abort() }
 
         // ----- artwork rectangles (relative to the sheet) ---------------------------------------
         val miniArtH = MiniArtH.px()
@@ -704,6 +752,7 @@ fun PlayerSheet(
                     shape = if (curl > 0.3f || rip > 0.3f) TideShape(corner, curl, rip, w.edge.phase, unit) else RoundedCornerShape(corner)
                     clip = true
                 }
+                .eatable(page = true, layer = HoleLayer.Player)
                 .pointerInput(hasQueue, W) {
                     if (!hasQueue) return@pointerInput
                     val tracker = VelocityTracker()
@@ -727,6 +776,7 @@ fun PlayerSheet(
                                 if (goNext || goPrev) {
                                     val idx = conn.queue.value.currentIndex + if (goNext) 1 else -1
                                     swipe.animateTo(if (goNext) -W else W, tween(170))
+                                    swiped = true
                                     conn.jumpTo(idx)
                                     swipe.snapTo(if (goNext) W * 0.35f else -W * 0.35f)
                                     swipe.animateTo(0f, Motion.sheet())
@@ -843,12 +893,12 @@ fun PlayerSheet(
             if (showChrome) Box(Modifier.fillMaxSize().background(palette.chrome))
             // Layer 2 — blurred artwork backdrop. Laid out once at the full page's size (the sheet's
             // clip shows what fits), so its blur is made once and reused, not redone every frame.
-            if (showBackdrop) Backdrop(np.video.thumbnail, Modifier.pageSized(W, H, bottom = false).graphicsLayer { alpha = if (sheet.direct) 1f else pNow() })
+            if (showBackdrop) Backdrop(shownNp.video.thumbnail, Modifier.pageSized(W, H, bottom = false).graphicsLayer { alpha = if (sheet.direct) 1f else pNow() })
 
             // Layer 3 — mini player content
             if (showMini) {
                 MiniContent(
-                    np = np, conn = conn,
+                    np = shownNp, conn = conn,
                     textStart = with(density) { (miniArt.x + miniArt.w).toDp() } + 12.dp,
                     progress = if (np.durationMs > 0) pos.toFloat() / np.durationMs else 0f,
                     modifier = Modifier
@@ -878,6 +928,7 @@ fun PlayerSheet(
                     // Grabber: says "this pulls down" without words.
                     Box(
                         Modifier.align(Alignment.TopCenter)
+                            .eatable(layer = HoleLayer.Player)
                             .graphicsLayer { val a = fade(); alpha = a; translationY = held() * 0.75f }
                             .padding(top = statusTop + 10.dp)
                             .size(56.dp, 24.dp)
@@ -923,6 +974,7 @@ fun PlayerSheet(
                 // player shows the middle 16:9 of it, so the shape opens out as it rises.
                 Box(
                     Modifier
+                        .eatable(layer = HoleLayer.Player)
                         .layout { m, c ->
                             val fa = fullArtFor(artShape.value)
                             val pl = m.measure(Constraints.fixed(fa.w.roundToInt(), fa.h.roundToInt()))
@@ -956,7 +1008,7 @@ fun PlayerSheet(
                         }
                         .background(Color(0xFF2C2C2E))
                 ) {
-                    RemoteImage(np.video.thumbnail, Modifier.fillMaxSize())
+                    RemoteImage(shownNp.video.thumbnail, Modifier.fillMaxSize())
                     ArtworkGestures(
                         enabled = fullyOpen,
                         playing = np.playing,
@@ -973,13 +1025,13 @@ fun PlayerSheet(
             if (queueShown && hasQueue) {
                 Box(
                     Modifier.fillMaxSize()
-                        .graphicsLayer { alpha = sheet.queue.value.coerceIn(0f, 1f) }
+                        .graphicsLayer { alpha = if (Hole.gone(HoleLayer.Queue)) 0f else sheet.queue.value.coerceIn(0f, 1f) }
                         .background(Color.Black.copy(alpha = 0.18f))
                         .clickable(remember { MutableInteractionSource() }, null, onClickLabel = "Close queue") {
                             scope.launch { sheet.closeQueue(tapped = true) }
                         }
                 )
-                QueuePanel(
+                CompositionLocalProvider(LocalHoleLayer provides HoleLayer.Queue) { QueuePanel(
                     queue = queue,
                     open = sheet.queue,
                     rows = sheet.queueRows,
@@ -992,7 +1044,7 @@ fun PlayerSheet(
                     soundPosition = { conn.positionMs() * 1000L },
                     onClose = { scope.launch { sheet.closeQueue(tapped = true) } },
                     modifier = Modifier.align(Alignment.BottomCenter),
-                )
+                ) }
             }
         }
     }
@@ -1034,8 +1086,12 @@ private fun MiniContent(
                 Text(np.video.title, Type.subheadStrong, maxLines = 1)
                 Text(np.video.channel, Type.footnote, color = p.secondary, maxLines = 1)
             }
-            CircleButton(onClick = { conn.togglePlay() }, size = 48.dp, highlight = p.fill, enabled = !np.ended) {
-                PlayPauseGlyph(showPause = np.playing || np.waiting, ended = np.ended, tint = p.label, size = 24.dp)
+            // At the end (nothing after it), the button plays it again from the start.
+            CircleButton(
+                onClick = { if (np.ended) conn.replay() else conn.togglePlay() }, size = 48.dp, highlight = p.fill,
+                label = if (np.ended) "Play again" else if (np.playing) "Pause" else "Play",
+            ) {
+                PlayPauseGlyph(showPause = np.playing || np.waiting, ended = np.ended, tint = p.label, size = 24.dp, replay = true)
             }
         }
         MiniProgress(progress, p.label, Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(horizontal = 14.dp))
@@ -1063,24 +1119,33 @@ private fun NowPlayingControls(
 ) {
     val scope = rememberCoroutineScope()
     Column(modifier) {
-        Row(Modifier.graphicsLayer { translationY = titleShift() }, verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.eatable(layer = HoleLayer.Player).graphicsLayer { translationY = titleShift() }, verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 12.dp)) {
                 Text(
                     np.video.title, Type.title3, color = Color.White, maxLines = 1,
                     modifier = Modifier.basicMarquee(iterations = 2, initialDelayMillis = 2200, repeatDelayMillis = 2600),
                 )
                 Spacer(Modifier.height(2.dp))
-                Text(np.video.channel, Type.body, color = Color.White.copy(alpha = 0.6f), maxLines = 1)
+                val channelActions = app.earful.ui.components.LocalChannelActions.current
+                Text(
+                    np.video.channel, Type.body, color = Color.White.copy(alpha = 0.6f), maxLines = 1,
+                    modifier = Modifier.pressable(scaleTo = 0.96f, label = "Open channel") { channelActions.open(np.video) },
+                )
             }
-            Box(Modifier.clip(CircleShape).background(Color.White.copy(alpha = 0.14f))) {
+            // (a live broadcast can't be saved: it's heard as it happens)
+            if (!np.video.isLive) Box(Modifier.clip(CircleShape).background(Color.White.copy(alpha = 0.14f))) {
                 SaveButton(saved, onToggleSave, tint = Color.White, size = 20)
             }
         }
         Column(Modifier.graphicsLayer { translationY = controlsShift() }) {
             Spacer(Modifier.height(26.dp))
             val ads by PlaybackEvents.ads.collectAsStateWithLifecycle()
+            LaunchedEffect(positionMs, rewind.shown != null, rewind.atStart) { if (rewind.shown != null && positionMs < 2_000) rewind.atStart = true }
             val shownMs = rewind.shown?.let { (it * np.durationMs).toLong() } ?: positionMs
-            Scrubber(shownMs, np.durationMs, downloaded, onSeek = conn::seekTo, ads = ads[np.video.id].orEmpty(), follow = rewind.shown != null)
+            Box(Modifier.eatable(layer = HoleLayer.Player)) {
+                if (np.video.isLive) LiveBar(behindMs = (np.durationMs - positionMs).coerceAtLeast(0), onNow = { conn.goLive() })
+                else Scrubber(shownMs, np.durationMs, downloaded, onSeek = conn::seekTo, ads = ads[np.video.id].orEmpty(), follow = rewind.shown != null)
+            }
             Spacer(Modifier.height(18.dp))
             Row(
                 Modifier.fillMaxWidth(),
@@ -1090,6 +1155,7 @@ private fun NowPlayingControls(
                 SkipButton(forward = false) { conn.seekBy(-10_000) }
                 val ending = np.ended || rewind.running
                 CircleButton(
+                    modifier = Modifier.eatable(layer = HoleLayer.Player),
                     onClick = { if (ending) scope.launch { rewind.play(conn) } else conn.togglePlay() },
                     size = 92.dp,
                     label = if (ending) "Play again" else if (np.playing) "Pause" else "Play",
@@ -1102,14 +1168,39 @@ private fun NowPlayingControls(
                 SkipButton(forward = true) { conn.seekBy(10_000) }
             }
             Spacer(Modifier.height(20.dp))
-            StatusLine(np, downloaded, justSaved, error, onRetry = { conn.retry(np.video) })
+            Box(Modifier.eatable(layer = HoleLayer.Player)) { StatusLine(np, downloaded, justSaved, error, onRetry = { conn.retry(np.video) }) }
             Spacer(Modifier.height(6.dp))
             // Space is always reserved, so nothing shifts when the button fades in.
             val upNextAlpha by animateFloatAsState(if (showUpNext) 1f else 0f, tween(250), label = "upnext")
             // It fades as Up next rises out of it.
-            Box(Modifier.graphicsLayer { alpha = upNextAlpha * (1f - (queueOpen() * 3f).coerceIn(0f, 1f)) }) {
+            Box(Modifier.eatable(layer = HoleLayer.Player).graphicsLayer { alpha = upNextAlpha * (1f - (queueOpen() * 3f).coerceIn(0f, 1f)) }) {
                 UpNextButton(upcoming, enabled = showUpNext, onClick = onOpenQueue)
             }
+        }
+    }
+}
+
+/**
+ * In place of the progress bar while listening live: a red LIVE tag. Gone back with −10 s, it
+ * says how far behind you are, and tapping it jumps back to now.
+ */
+@Composable
+private fun LiveBar(behindMs: Long, onNow: () -> Unit) {
+    val behind = behindMs > 25_000
+    Box(Modifier.fillMaxWidth().height(44.dp), contentAlignment = Alignment.Center) {
+        Row(
+            Modifier.clip(RoundedCornerShape(50))
+                .background(if (behind) Color.White.copy(alpha = 0.14f) else app.earful.ui.components.LiveRed)
+                .clickable(enabled = behind, onClickLabel = "Back to live", onClick = onNow)
+                .padding(horizontal = 12.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(7.dp).clip(CircleShape).background(if (behind) app.earful.ui.components.LiveRed else Color.White))
+            Spacer(Modifier.width(7.dp))
+            Text(
+                if (behind) "${behindMs / 60_000}:${"%02d".format((behindMs / 1000) % 60)} behind · back to live" else "LIVE",
+                Type.captionStrong.copy(fontFeatureSettings = "tnum"), color = Color.White, maxLines = 1,
+            )
         }
     }
 }
@@ -1230,6 +1321,8 @@ internal class Rewind {
     var running by mutableStateOf(false)
     /** What the progress bar shows meanwhile (0..1 of the video), null when it shows the real time. */
     var shown by mutableStateOf<Float?>(null)
+    /** Set by the screen once the time it shows is back near 0:00. */
+    var atStart by mutableStateOf(false)
 
     suspend fun play(conn: PlayerConnection) = coroutineScope {
         if (running) return@coroutineScope
@@ -1247,11 +1340,13 @@ internal class Rewind {
             bounce.animateTo(0f, androidx.compose.animation.core.spring(dampingRatio = 0.4f, stiffness = 500f)) {
                 shown = value.coerceAtLeast(0f) // it overshoots the start a little and springs back
             }
-            // hand the bar back once the player is really at the start
-            var waited = 0
-            while (conn.positionMs() > 2_000 && waited < 20) { delay(50); waited++ }
-            delay(260)
+            // Hand the bar back only once the time the screen shows (polled, so it can lag behind the
+            // player) is really at the start: otherwise the bar flashes back to the end for a moment.
+            shown = 0f
+            atStart = false
+            withTimeoutOrNull(2_000) { snapshotFlow { atStart }.first { it } }
         } finally {
+            atStart = false
             shown = null
             roll.snapTo(0f)
             running = false

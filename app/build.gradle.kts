@@ -82,6 +82,8 @@ dependencies {
     // Playback
     implementation("androidx.media3:media3-exoplayer:1.11.1")
     implementation("androidx.media3:media3-session:1.11.1")
+    // Live broadcasts only (they come as HLS); everything else is a plain file.
+    implementation("androidx.media3:media3-exoplayer-hls:1.11.1")
 
     // UI — Compose foundation only (no Material), our own design system on top
     implementation(platform("androidx.compose:compose-bom:2026.09.00"))

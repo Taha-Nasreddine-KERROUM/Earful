@@ -91,7 +91,7 @@ class PlaybackService : MediaSessionService() {
         val extractors = ExtractorsFactory { arrayOf(MatroskaExtractor(), FragmentedMp4Extractor(), Mp4Extractor()) }
 
         val exo = ExoPlayer.Builder(this, renderers)
-            .setMediaSourceFactory(ProgressiveMediaSource.Factory(CachedAudioDataSource.Factory(), extractors))
+            .setMediaSourceFactory(Sources(ProgressiveMediaSource.Factory(CachedAudioDataSource.Factory(), extractors)))
             .setAudioAttributes(
                 AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(),
                 /* handleAudioFocus= */ true,
@@ -113,19 +113,24 @@ class PlaybackService : MediaSessionService() {
 
         // The queue is the player's playlist. Whenever the current or next track changes we
         // keep exactly those two on the phone and delete the audio of anything before.
+        // (Nothing in here may ever crash the service: that would stop the music in your pocket.)
         exo.addListener(object : Player.Listener {
-            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) { updateWindow(); recordListen(); saveSession() }
-            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) { updateWindow(); saveSession() }
-            override fun onPlayerError(error: androidx.media3.common.PlaybackException) = skipIfUnplayable()
-            override fun onIsPlayingChanged(isPlaying: Boolean) = saveSession()
-            override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) = saveSession()
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) = safely {
+                retries = 0
+                notePassed()
+                updateWindow(); recordListen(); saveSession()
+            }
+            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = safely { updateWindow(); saveSession() }
+            override fun onPlayerError(error: androidx.media3.common.PlaybackException) = safely { recover() }
+            override fun onIsPlayingChanged(isPlaying: Boolean) = safely { saveSession() }
+            override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) = safely { saveSession() }
         })
         // While playing, note the position every few seconds (a tiny file write), so even if
         // Android kills the app you come back within a few seconds of where you were.
         scope.launch {
             while (true) {
                 delay(5_000)
-                if (exoRef?.isPlaying == true) saveSession()
+                if (exoRef?.isPlaying == true) safely { saveSession(); retries = 0 }
             }
         }
         AudioCache.onResolved = ::onResolved
@@ -163,6 +168,86 @@ class PlaybackService : MediaSessionService() {
             exo.setMediaItems(saved.items.map(::itemFor), saved.index, saved.positionMs)
             exo.prepare()
         }
+        notePassed()
+    }
+
+    private inline fun safely(block: () -> Unit) {
+        try { block() } catch (t: Throwable) { android.util.Log.w("Earful", "playback callback", t) }
+    }
+
+    // ---- staying alive -------------------------------------------------------------------------
+
+    /** Attempts to get the current track going again after an error (reset once it plays). */
+    private var retries = 0
+
+    /**
+     * Something went wrong while playing. A track YouTube refuses is skipped (if there's one
+     * after it). Anything else (a hiccup reading the file, the sound chip, a dropped connection)
+     * is tried again from the same spot, a few times, so the music doesn't just stop while the
+     * phone is in your pocket.
+     */
+    private fun recover() {
+        val p = exoRef ?: return
+        val id = p.currentMediaItem?.mediaId ?: return
+        if (AudioCache.failures[id] != null) { skipIfUnplayable(); return }
+        val live = id.startsWith(Video.LIVE)
+        if (!p.playWhenReady || retries >= 6) return
+        val attempt = ++retries
+        val index = p.currentMediaItemIndex
+        val pos = p.currentPosition
+        scope.launch {
+            delay(if (attempt == 1) 300L else 1_000L * attempt)
+            val q = exoRef ?: return@launch
+            if (q.playerError == null || q.currentMediaItem?.mediaId != id) return@launch
+            PlaybackEvents.clearError()
+            AudioCache.get(id)?.takeIf { it.fatal != null }?.let { AudioCache.forget(id) }
+            if (live) q.seekToDefaultPosition(index) else q.seekTo(index, pos) // live: back to now
+            q.prepare()
+            q.play()
+        }
+    }
+
+    // ---- passed videos leave the queue a minute later -------------------------------------------
+
+    /** When each passed video (by id) was left behind. */
+    private val passedAt = HashMap<String, Long>()
+    private var pruneJob: kotlinx.coroutines.Job? = null
+
+    private fun notePassed() {
+        val p = exoRef ?: return
+        val now = android.os.SystemClock.elapsedRealtime()
+        val cur = p.currentMediaItemIndex
+        val before = HashSet<String>()
+        for (i in 0 until minOf(cur, p.mediaItemCount)) {
+            val id = p.getMediaItemAt(i).mediaId
+            before += id
+            passedAt.getOrPut(id) { now }
+        }
+        // back on one (or no longer in the queue): its minute starts over next time it's passed
+        passedAt.keys.retainAll(before)
+        schedulePrune()
+    }
+
+    private fun schedulePrune() {
+        pruneJob?.cancel()
+        val first = passedAt.values.minOrNull() ?: return
+        val wait = (first + PASSED_STAYS_MS - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0) + 50
+        pruneJob = scope.launch {
+            delay(wait)
+            safely { prune() }
+        }
+    }
+
+    private fun prune() {
+        val p = exoRef ?: return
+        val now = android.os.SystemClock.elapsedRealtime()
+        // From the end backwards, so the indexes in front stay valid.
+        for (i in minOf(p.currentMediaItemIndex, p.mediaItemCount) - 1 downTo 0) {
+            val id = p.getMediaItemAt(i).mediaId
+            val at = passedAt[id] ?: continue
+            if (now - at >= PASSED_STAYS_MS) { p.removeMediaItem(i); passedAt.remove(id) }
+        }
+        schedulePrune()
     }
 
     private fun itemFor(v: Video): MediaItem = MediaItem.Builder()
@@ -175,19 +260,23 @@ class PlaybackService : MediaSessionService() {
     private fun saveSession() {
         val p = exoRef ?: return
         if (p.mediaItemCount == 0) { Session.clear(); return }
-        val items = (0 until p.mediaItemCount).map { i ->
+        val kept = (0 until p.mediaItemCount).filterNot { p.getMediaItemAt(it).mediaId.startsWith(Video.LIVE) }
+        if (kept.isEmpty()) { Session.clear(); return }
+        val items = kept.map { i ->
             val item = p.getMediaItemAt(i)
             item.mediaMetadata.extras?.let { videoFromExtras(item.mediaId, it) }
                 ?: Video(item.mediaId, item.mediaMetadata.title?.toString().orEmpty(),
                     item.mediaMetadata.artist?.toString().orEmpty(), Video.fallbackThumb(item.mediaId), 0)
         }
-        Session.save(items, p.currentMediaItemIndex, p.currentPosition)
+        val cur = p.currentMediaItemIndex
+        val index = kept.indexOf(cur).takeIf { it >= 0 } ?: kept.count { it < cur }.coerceAtMost(kept.size - 1)
+        Session.save(items, index, if (kept.contains(cur)) p.currentPosition else 0L)
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo) = session
 
     override fun onDestroy() {
-        saveSession()
+        safely { saveSession() }
         scope.cancel()
         session?.run { player.release(); release() }
         session = null
@@ -231,15 +320,45 @@ class PlaybackService : MediaSessionService() {
             mediaSession: MediaSession,
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>,
-        ): ListenableFuture<MutableList<MediaItem>> = Futures.immediateFuture(
-            mediaItems.map { item ->
-                MediaItem.Builder()
-                    .setMediaId(item.mediaId)
-                    .setUri(CachedAudioDataSource.uriFor(item.mediaId))
-                    .setMediaMetadata(item.mediaMetadata)
-                    .build()
-            }.toMutableList()
-        )
+        ): ListenableFuture<MutableList<MediaItem>> {
+            if (mediaItems.none { it.mediaId.startsWith(Video.LIVE) }) return Futures.immediateFuture(
+                mediaItems.map { item ->
+                    MediaItem.Builder()
+                        .setMediaId(item.mediaId)
+                        .setUri(CachedAudioDataSource.uriFor(item.mediaId))
+                        .setMediaMetadata(item.mediaMetadata)
+                        .build()
+                }.toMutableList()
+            )
+            // A live broadcast: ask YouTube where it's streaming right now (it changes every
+            // broadcast, so it can't be known ahead).
+            val result = com.google.common.util.concurrent.SettableFuture.create<MutableList<MediaItem>>()
+            scope.launch {
+                try {
+                    result.set(mediaItems.map { item ->
+                        if (!item.mediaId.startsWith(Video.LIVE)) MediaItem.Builder()
+                            .setMediaId(item.mediaId).setUri(CachedAudioDataSource.uriFor(item.mediaId))
+                            .setMediaMetadata(item.mediaMetadata).build()
+                        else liveItem(item)
+                    }.toMutableList())
+                } catch (t: Throwable) {
+                    PlaybackEvents.report(t.message?.takeIf { "live" in it } ?: "Couldn't tune in. Check your connection and try again.")
+                    result.setException(t)
+                }
+            }
+            return result
+        }
+    }
+
+    private suspend fun liveItem(item: MediaItem): MediaItem {
+        val (video, hls) = YouTube.live(item.mediaId.removePrefix(Video.LIVE))
+        return MediaItem.Builder()
+            .setMediaId(item.mediaId)
+            .setUri(hls)
+            .setMimeType(MimeTypes.APPLICATION_M3U8)
+            .setLiveConfiguration(MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(12_000).build())
+            .setMediaMetadata(metadataFor(video))
+            .build()
     }
 
     private val related = HashMap<String, List<Video>>()
@@ -251,8 +370,9 @@ class PlaybackService : MediaSessionService() {
         if (p.mediaItemCount == 0) { scheduleAds(); return }
         val cur = p.currentMediaItem?.mediaId ?: return
         val next = if (p.hasNextMediaItem()) p.getMediaItemAt(p.nextMediaItemIndex).mediaId else null
-        AudioCache.retain(listOfNotNull(cur, next))
-        next?.let { loadAds(it) }
+        // (a live broadcast streams as it goes: there's nothing to download ahead)
+        AudioCache.retain(listOfNotNull(cur, next).filterNot { it.startsWith(Video.LIVE) })
+        next?.takeUnless { it.startsWith(Video.LIVE) }?.let { loadAds(it) }
         scheduleAds()
     }
 
@@ -278,6 +398,7 @@ class PlaybackService : MediaSessionService() {
         adMessages.clear()
         val exo = exoRef ?: return
         val id = exo.currentMediaItem?.mediaId ?: return
+        if (id.startsWith(Video.LIVE)) return
         val segs = PlaybackEvents.ads.value[id] ?: run { loadAds(id); return }
         val index = exo.currentMediaItemIndex
         segs.forEach { seg ->
@@ -356,6 +477,9 @@ class PlaybackService : MediaSessionService() {
     }
 
     companion object {
+        /** How long a video you've moved past stays in Up next before it goes. */
+        const val PASSED_STAYS_MS = 60_000L
+
         fun metadataFor(v: Video): MediaMetadata = MediaMetadata.Builder()
             .setTitle(v.title)
             .setArtist(v.channel)
@@ -391,5 +515,38 @@ private class NoReplayPlayer(player: Player) : ForwardingPlayer(player) {
     }
     override fun seekToDefaultPosition(mediaItemIndex: Int) {
         if (playbackState != Player.STATE_ENDED) super.seekToDefaultPosition(mediaItemIndex)
+    }
+}
+
+/**
+ * Where the player gets its sound: normal videos from the file being downloaded (see
+ * [CachedAudioDataSource]), live broadcasts straight from YouTube's live stream (HLS).
+ */
+@UnstableApi
+private class Sources(private val files: ProgressiveMediaSource.Factory) : androidx.media3.exoplayer.source.MediaSource.Factory {
+    private val live by lazy {
+        androidx.media3.exoplayer.hls.HlsMediaSource.Factory(
+            androidx.media3.datasource.DefaultHttpDataSource.Factory()
+                .setUserAgent(app.earful.data.Network.USER_AGENT)
+                .setAllowCrossProtocolRedirects(true)
+        )
+    }
+    private var drm: androidx.media3.exoplayer.drm.DrmSessionManagerProvider? = null
+    private var errors: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy? = null
+
+    override fun setDrmSessionManagerProvider(p: androidx.media3.exoplayer.drm.DrmSessionManagerProvider) = apply {
+        drm = p; files.setDrmSessionManagerProvider(p)
+    }
+    override fun setLoadErrorHandlingPolicy(p: androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy) = apply {
+        errors = p; files.setLoadErrorHandlingPolicy(p)
+    }
+    override fun getSupportedTypes(): IntArray = intArrayOf(C.CONTENT_TYPE_OTHER, C.CONTENT_TYPE_HLS)
+    override fun createMediaSource(mediaItem: MediaItem): androidx.media3.exoplayer.source.MediaSource {
+        val scheme = mediaItem.localConfiguration?.uri?.scheme
+        if (scheme == "earful" || !mediaItem.mediaId.startsWith(Video.LIVE)) return files.createMediaSource(mediaItem)
+        val f = live
+        drm?.let { f.setDrmSessionManagerProvider(it) }
+        errors?.let { f.setLoadErrorHandlingPolicy(it) }
+        return f.createMediaSource(mediaItem)
     }
 }

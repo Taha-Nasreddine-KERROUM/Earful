@@ -74,7 +74,7 @@ object YouTube {
     suspend fun related(videoId: String): List<Video> = io {
         val ex = service.getStreamExtractor("https://www.youtube.com/watch?v=$videoId")
         ex.fetchPage()
-        ex.relatedItems?.items.orEmpty().filterIsInstance<StreamInfoItem>().mapNotNull(Video::from)
+        ex.relatedItems?.items.orEmpty().toVideos()
     }
 
     // ---- playback -------------------------------------------------------------------------
@@ -98,6 +98,7 @@ object YouTube {
             views = info.viewCount,
             uploaded = info.textualUploadDate,
             channelAvatar = Video.bestImage(info.uploaderAvatars, maxWidth = 96),
+            channelUrl = info.uploaderUrl?.takeIf { it.isNotBlank() } ?: fallback?.channelUrl,
         )
         val length = audio.itagItem?.contentLength?.takeIf { it > 0 }
             ?: Regex("[?&]clen=(\\d+)").find(audio.content)?.groupValues?.get(1)?.toLong()
@@ -109,7 +110,7 @@ object YouTube {
             mime = if (audio.format == MediaFormat.WEBMA_OPUS || audio.format == MediaFormat.WEBMA)
                 "audio/webm" else "audio/mp4",
             bitrateKbps = kbps(audio),
-            related = info.relatedItems.filterIsInstance<StreamInfoItem>().mapNotNull(Video::from),
+            related = info.relatedItems.toVideos(),
         )
     }
 
@@ -140,8 +141,36 @@ object YouTube {
         return if (br > 10_000) br / 1000 else br.coerceAtLeast(1)
     }
 
-    private fun List<*>.toVideos(): List<Video> =
-        filterIsInstance<StreamInfoItem>().mapNotNull(Video::from).distinctBy { it.id }
+    /** Normal videos only; any live broadcast among them is noted for its channel's logo. */
+    internal fun List<*>.toVideos(): List<Video> {
+        val items = filterIsInstance<StreamInfoItem>()
+        items.forEach { it -> Video.liveFrom(it)?.let(LiveNow::seen) }
+        return items.mapNotNull(Video::from).distinctBy { it.id }
+    }
 
-    private suspend fun <T> io(block: suspend () -> T): T = withContext(Dispatchers.IO) { block() }
+    /** What a live broadcast streams right now (HLS), with its details. */
+    suspend fun live(videoId: String): Pair<Video, String> = io {
+        val info = StreamInfo.getInfo(service, "https://www.youtube.com/watch?v=$videoId")
+        val url = info.hlsUrl?.takeIf { it.isNotBlank() } ?: error("This broadcast isn't live any more.")
+        Video(
+            id = Video.LIVE + videoId,
+            title = info.name.orEmpty(),
+            channel = info.uploaderName.orEmpty(),
+            thumbnail = Video.bestImage(info.thumbnails, maxWidth = 1280) ?: Video.fallbackThumb(videoId),
+            durationSec = 0,
+            channelAvatar = Video.bestImage(info.uploaderAvatars, maxWidth = 96),
+            channelUrl = info.uploaderUrl?.takeIf { it.isNotBlank() },
+        ) to url
+    }
+
+    /** The channel a video is from, for videos that don't know it (saved by an older version). */
+    suspend fun channelUrlOf(videoId: String): String? = io {
+        runCatching {
+            val ex = service.getStreamExtractor("https://www.youtube.com/watch?v=$videoId")
+            ex.fetchPage()
+            ex.uploaderUrl
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+    }
+
+    internal suspend fun <T> io(block: suspend () -> T): T = withContext(Dispatchers.IO) { block() }
 }

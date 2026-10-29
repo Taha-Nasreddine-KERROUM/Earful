@@ -68,9 +68,18 @@ object SoundLevels {
         count = 0
     }
 
+    /** How many things on screen are showing the bars. With none, the sound isn't measured at
+     *  all (only counted, to keep the times right): no work while the screen is off. */
+    @Volatile var watchers = 0
+
     @Synchronized
     internal fun analyze(buf: ByteBuffer, channels: Int) {
         if (channels <= 0 || aLow == 0f) return
+        if (watchers <= 0) {
+            frames += buf.remaining() / (2 * channels)
+            n = 0; acc.fill(0.0)
+            return
+        }
         val b = buf.duplicate().order(ByteOrder.nativeOrder())
         val frameBytes = 2 * channels
         while (b.remaining() >= frameBytes) {

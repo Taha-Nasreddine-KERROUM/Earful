@@ -79,12 +79,14 @@ class SearchMotion {
         if (open) return@coroutineScope
         open = true
         leave.snapTo(0f); field.snapTo(0f); hint.snapTo(0f); back.snapTo(0f); morph.snapTo(0f)
+        // Search is built (still invisible) while the magnifier dips, so the work of building it
+        // doesn't land on the first frames of the field growing.
+        entering = true
+        shown = true
         // The magnifier dips as if it has weight…
         dip.animateTo(0.86f, tween(90, easing = Motion.outCubic))
         morphing = true
         dip.snapTo(1f)
-        entering = true
-        shown = true
         // …Home goes under, search's background rises over it, the tab bar sinks away…
         launch { homeUnder.animateTo(1f, tween(360, easing = Motion.inOutCubic)) }
         launch { delay(80); bg.animateTo(1f, tween(260, easing = Motion.outCubic)) }

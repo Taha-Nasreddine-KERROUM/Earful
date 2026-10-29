@@ -17,13 +17,18 @@ data class Video(
     val views: Long = -1,
     val uploaded: String? = null,
     val channelAvatar: String? = null,
+    /** The channel's page on YouTube, for opening it. Unknown for videos saved by older versions. */
+    val channelUrl: String? = null,
 ) {
-    val url: String get() = "https://www.youtube.com/watch?v=$id"
+    /** A live broadcast (its id is "live:" + the YouTube id): heard as it happens, never saved. */
+    val isLive: Boolean get() = id.startsWith(LIVE)
+    val youtubeId: String get() = id.removePrefix(LIVE)
+    val url: String get() = "https://www.youtube.com/watch?v=$youtubeId"
 
     fun toJson(): JSONObject = JSONObject()
         .put("id", id).put("title", title).put("channel", channel)
         .put("thumb", thumbnail).put("dur", durationSec).put("views", views)
-        .putOpt("up", uploaded).putOpt("av", channelAvatar)
+        .putOpt("up", uploaded).putOpt("av", channelAvatar).putOpt("cu", channelUrl)
 
     companion object {
         fun fromJson(o: JSONObject) = Video(
@@ -35,7 +40,10 @@ data class Video(
             views = o.optLong("views", -1),
             uploaded = o.optString("up").ifEmpty { null },
             channelAvatar = o.optString("av").ifEmpty { null },
+            channelUrl = o.optString("cu").ifEmpty { null },
         )
+
+        const val LIVE = "live:"
 
         private val ID_REGEX = Regex("""(?:v=|/shorts/|youtu\.be/|/embed/|/live/)([A-Za-z0-9_-]{11})""")
 
@@ -66,6 +74,22 @@ data class Video(
                 views = item.viewCount,
                 uploaded = item.textualUploadDate,
                 channelAvatar = bestImage(item.uploaderAvatars, maxWidth = 96),
+                channelUrl = item.uploaderUrl?.takeIf { it.isNotBlank() },
+            )
+        }
+
+        /** A broadcast that's live right now, as something to listen to; null for anything else. */
+        fun liveFrom(item: StreamInfoItem): Video? {
+            if (item.streamType != StreamType.LIVE_STREAM && item.streamType != StreamType.AUDIO_LIVE_STREAM) return null
+            val id = idFromUrl(item.url) ?: return null
+            return Video(
+                id = LIVE + id,
+                title = item.name.orEmpty(),
+                channel = item.uploaderName.orEmpty(),
+                thumbnail = bestImage(item.thumbnails, maxWidth = 720) ?: fallbackThumb(id),
+                durationSec = 0,
+                channelAvatar = bestImage(item.uploaderAvatars, maxWidth = 96),
+                channelUrl = item.uploaderUrl?.takeIf { it.isNotBlank() },
             )
         }
 

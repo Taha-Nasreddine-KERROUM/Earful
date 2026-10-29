@@ -31,7 +31,8 @@ import java.util.concurrent.ConcurrentHashMap
  *
  * Playback reads from this file while it grows, so sound starts within a second, and once the
  * download finishes the network is no longer needed at all — a tunnel or a dropped connection
- * can't interrupt you. It lives in the app's cache folder: "Clear cache" wipes it.
+ * can't interrupt you. It lives in the app's own files (not the cache folder, which Android may
+ * empty while the app is closed), and is deleted as soon as it's no longer needed.
  */
 @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
 class AudioFile(val videoId: String, val file: File) {
@@ -107,8 +108,16 @@ object AudioCache {
      * Their audio stays so you resume instantly, even offline; anything else is leftover: binned.
      */
     fun init(context: Context, keep: Set<String>) {
-        dir = File(context.cacheDir, "audio")
+        dir = File(context.filesDir, "audio")
         dir.mkdirs()
+        // Older versions kept it in the cache folder, which Android empties when space runs low:
+        // a video left open could lose its audio while the app was closed. Bring it over once.
+        File(context.cacheDir, "audio").takeIf { it.isDirectory }?.let { old ->
+            old.listFiles()?.forEach { f ->
+                if (f.name.substringBeforeLast('.') in keep) runCatching { f.renameTo(File(dir, f.name)) || run { f.copyTo(File(dir, f.name), true); f.delete() } }
+            }
+            old.deleteRecursively()
+        }
         dir.listFiles()?.forEach { f ->
             if (f.name.substringBeforeLast('.') !in keep) f.delete()
         }
@@ -224,6 +233,7 @@ object AudioCache {
     /** Looks the track up; waits out dropped connections, gives up only on real refusals. */
     private suspend fun CoroutineScope.resolve(f: AudioFile): ResolvedAudio? {
         var backoff = 1500L
+        var hiccups = 0
         while (isActive) {
             try {
                 return YouTube.resolve(f.videoId, null)
@@ -233,6 +243,13 @@ object AudioCache {
             } catch (t: Throwable) {
                 ensureActive()
                 val msg = friendly(t)
+                // A real refusal (age, country, private, removed) is final. Anything else is often
+                // a passing hiccup on YouTube's side: ask again a few times before giving up, so a
+                // queued video doesn't fail in your pocket and stop the music.
+                if (!permanent(t) && hiccups++ < 3) {
+                    delay(backoff); backoff = (backoff * 2).coerceAtMost(15_000)
+                    continue
+                }
                 val name = t::class.java.simpleName
                 if ("Parsing" in name || "Extraction" in name || msg == "Couldn't load this one.") onReaderOutdated?.invoke()
                 failures[f.videoId] = msg
@@ -248,6 +265,7 @@ object AudioCache {
         var requestNo = 0
         var backoff = 1000L
         var refreshes = 0
+        var expiredRounds = 0
         var plainGet = false
         if (f.written == 0L) f.file.delete() // otherwise: carry on from where a previous run stopped
         FileOutputStream(f.file, true).use { out ->
@@ -260,9 +278,16 @@ object AudioCache {
                     val got = fetchRange(url, requestNo++, pos, end, out, f, plainGet)
                     if (got == 0L && total > 0) throw IOException("empty response")
                     backoff = 1000L
+                    refreshes = 0 // links expire now and then over a long download: that's normal
                     if (got == 0L || (total <= 0 && got < end - pos + 1)) break // reached the end
                 } catch (e: ExpiredLink) {
-                    if (refreshes++ >= 3) { fail(f, "YouTube refused this one."); return }
+                    if (refreshes++ >= 3) {
+                        // Refused several times in a row: wait a little and start over with a
+                        // fresh link before giving up for good.
+                        if (expiredRounds++ >= 3) { fail(f, "YouTube refused this one."); return }
+                        delay(10_000L * expiredRounds)
+                        refreshes = 1
+                    }
                     if (refreshes >= 2) plainGet = !plainGet
                     val fresh = runCatching { refresh() }.getOrNull()
                     if (fresh != null) {
@@ -286,6 +311,12 @@ object AudioCache {
     private fun fail(f: AudioFile, msg: String) {
         failures[f.videoId] = msg
         f.fail(IOException(msg))
+    }
+
+    private fun permanent(t: Throwable): Boolean {
+        val name = t::class.java.simpleName
+        return "AgeRestricted" in name || "Geographic" in name || "Private" in name ||
+            "ContentNotAvailable" in name || "Unavailable" in name || "Paid" in name || "Premium" in name
     }
 
     private fun friendly(t: Throwable): String {

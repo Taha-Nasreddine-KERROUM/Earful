@@ -1,5 +1,9 @@
 package app.earful.ui.search
 
+import app.earful.ui.hole.eatable
+import app.earful.ui.hole.HoleLayer
+import app.earful.ui.hole.LocalHoleLayer
+import androidx.compose.runtime.CompositionLocalProvider
 import android.os.Build
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.LinearEasing
@@ -41,6 +45,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.foundation.layout.isImeVisible
+import kotlinx.coroutines.flow.first
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.TileMode
@@ -132,6 +141,7 @@ class SearchModel : ViewModel() {
     }
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun SearchScreen(
     bottomPadding: Dp,
@@ -139,6 +149,8 @@ fun SearchScreen(
     onPlay: (Video) -> Unit,
     onQueue: (Video) -> Unit,
     onClose: () -> Unit,
+    /** The player is open over search (Now Playing, not the mini player). */
+    playerUp: Boolean = false,
     model: SearchModel = viewModel(),
 ) {
     val p = LocalPalette.current
@@ -150,9 +162,38 @@ fun SearchScreen(
     val savedIds = remember(saved) { saved.mapTo(HashSet()) { it.id } }
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
 
+    // The keyboard comes up once the field has nearly grown out of the magnifier, not while it's
+    // growing: a keyboard rising resizes the whole window, and doing both at once made the
+    // field's growth stutter and skip on slower phones.
     LaunchedEffect(Unit) {
-        if (model.submitted == null) focus.requestFocus()
-        model.watchSuggestions()
+        if (model.submitted == null) {
+            snapshotFlow { motion.morph.value >= 0.6f || motion.field.value >= 1f }.first { it }
+            focus.requestFocus()
+        }
+    }
+    LaunchedEffect(Unit) { model.watchSuggestions() }
+
+    // Opening a video while typing: the keyboard and the blinking cursor go away (they'd sit over
+    // Now Playing). Back to the mini player, you carry on typing where you left off.
+    var focused by remember { mutableStateOf(false) }
+    var typingAt by remember { mutableLongStateOf(0L) } // last moment the keyboard was up for this field
+    val imeUp = WindowInsets.isImeVisible
+    LaunchedEffect(focused, imeUp) { if (focused && imeUp) typingAt = System.currentTimeMillis() }
+    var resume by remember { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    LaunchedEffect(playerUp) {
+        if (playerUp) {
+            if (focused) {
+                // (a video tapped in the list hides the keyboard a moment before the player rises)
+                resume = System.currentTimeMillis() - typingAt < 900 && model.submitted == null
+                focusManager.clearFocus(force = true)
+                keyboard?.hide()
+            }
+        } else if (resume) {
+            resume = false
+            focus.requestFocus()
+            keyboard?.show()
+        }
     }
 
     val list = rememberLazyListState()
@@ -177,12 +218,13 @@ fun SearchScreen(
     }
 
     // Search covers Home: touches anywhere on it stay here, never reaching the videos behind.
-    Box(Modifier.fillMaxSize().blockTouches()) {
+    Box(Modifier.fillMaxSize().eatable(page = true, fill = p.bg, layer = HoleLayer.Search).blockTouches()) {
+    CompositionLocalProvider(LocalHoleLayer provides HoleLayer.Search) {
         // Search's own background rises over Home, which goes under.
         Box(Modifier.fillMaxSize().graphicsLayer { alpha = motion.bg.value }.background(p.bg))
         Column(Modifier.fillMaxSize().padding(top = statusTop)) {
             // ----- field -----------------------------------------------------------------------
-            Row(Modifier.fillMaxWidth().height(56.dp).padding(end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().eatable().height(56.dp).padding(end = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     Modifier.size(48.dp)
                         .graphicsLayer {
@@ -216,7 +258,7 @@ fun SearchScreen(
                             cursorBrush = SolidColor(p.accent),
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                             keyboardActions = KeyboardActions(onSearch = { go(model.field.text) }),
-                            modifier = Modifier.fillMaxWidth().focusRequester(focus),
+                            modifier = Modifier.fillMaxWidth().focusRequester(focus).onFocusChanged { focused = it.isFocused },
                         )
                     }
                     if (model.field.text.isNotEmpty()) {
@@ -315,6 +357,7 @@ fun SearchScreen(
             }
         }
     }
+    }
 }
 
 /** Rows float up one after another when search opens, and drop away as it closes. */
@@ -371,7 +414,7 @@ private fun SuggestionRow(
     val scope = rememberCoroutineScope()
     val xPop = remember { Animatable(1f) }
     Row(
-        modifier.fillMaxWidth().pressable(scaleTo = 0.985f, onClick = onClick).padding(start = 16.dp, end = 4.dp).height(48.dp),
+        modifier.eatable().fillMaxWidth().pressable(scaleTo = 0.985f, onClick = onClick).padding(start = 16.dp, end = 4.dp).height(48.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(icon, p.secondary, size = 18.dp)

@@ -21,14 +21,19 @@ object VideoShapes {
     fun init(context: Context) {
         val p = context.getSharedPreferences("video_shapes", Context.MODE_PRIVATE)
         prefs = p
-        _map.value = p.all.mapNotNull { (k, v) -> (v as? Float)?.let { k to it } }.toMap()
+        // (shapes remembered by an older version that now count as 16:9 are dropped)
+        _map.value = p.all.mapNotNull { (k, v) -> (v as? Float)?.takeIf { abs(it / WIDE - 1f) >= 0.12f }?.let { k to it } }.toMap()
     }
 
-    /** From the video's size in pixels. Close to 16:9 counts as 16:9; extremes are kept sensible. */
+    /**
+     * From the video's size in pixels. Anything near 16:9 (from about 1.56 to 2.0: 16:10, 1.85
+     * film, odd encodes) shows at the full 16:9 size; only clearly different shapes (4:3, square,
+     * upright, 2.39 cinema) get their own. Extremes are kept sensible.
+     */
     internal fun ratioOf(width: Int, height: Int): Float? {
         if (width <= 0 || height <= 0) return null
         val r = (width.toFloat() / height).coerceIn(9f / 16f, 2.4f)
-        return if (abs(r / WIDE - 1f) < 0.03f) WIDE else r
+        return if (abs(r / WIDE - 1f) < 0.12f) WIDE else r
     }
 
     internal fun put(id: String, width: Int, height: Int) {

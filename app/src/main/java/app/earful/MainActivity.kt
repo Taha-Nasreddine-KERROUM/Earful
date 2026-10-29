@@ -21,11 +21,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import app.earful.ui.theme.EarfulTheme
 
 class MainActivity : ComponentActivity() {
     private lateinit var conn: PlayerConnection
     private val signals = AppSignals()
+    /** The opening is playing: the player service waits until it's done (starting it takes the
+     *  phone a moment, which would make the opening stutter). */
+    private var opening = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -34,14 +38,22 @@ class MainActivity : ComponentActivity() {
         handle(intent)
         // The opening plays when the app is started fresh from its icon (not when it comes back
         // after turning the phone, or opens straight onto the player from the notification).
-        val opening = savedInstanceState == null && intent?.action == Intent.ACTION_MAIN &&
+        opening = savedInstanceState == null && intent?.action == Intent.ACTION_MAIN &&
             intent?.getBooleanExtra(EXTRA_OPEN_PLAYER, false) != true
+        val showIt = opening
         setContent {
             EarfulTheme {
                 Box(Modifier.fillMaxSize()) {
-                    AppRoot(conn, signals)
-                    var showOpening by rememberSaveable { mutableStateOf(opening) }
-                    if (showOpening) OpeningLogo { showOpening = false }
+                    // (while the opening covers everything, the app underneath isn't drawn at all)
+                    Box(Modifier.fillMaxSize().graphicsLayer { alpha = if (app.earful.ui.Intro.hidesApp) 0f else 1f }) {
+                        AppRoot(conn, signals)
+                    }
+                    var showOpening by rememberSaveable { mutableStateOf(showIt) }
+                    if (showOpening) OpeningLogo {
+                        showOpening = false
+                        opening = false
+                        conn.connect()
+                    }
                 }
             }
         }
@@ -58,7 +70,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onStart() { Updater.foreground = true; super.onStart(); conn.connect() }
+    override fun onStart() {
+        Updater.foreground = true
+        super.onStart()
+        if (!opening) conn.connect()
+    }
     override fun onStop() { Updater.foreground = false; conn.disconnect(); super.onStop() }
 
     override fun onNewIntent(intent: Intent) {

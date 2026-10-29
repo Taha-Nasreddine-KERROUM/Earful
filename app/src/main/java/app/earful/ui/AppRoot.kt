@@ -43,6 +43,15 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.drawBehind
+import app.earful.ui.hole.Hole
+import app.earful.ui.hole.HoleLayer
+import app.earful.ui.hole.HoleLens
+import app.earful.ui.hole.HoleOverlay
+import app.earful.ui.hole.StarField
+import app.earful.ui.hole.eatable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -75,6 +84,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+
+/** Asked once per launch at most (see AppRoot). */
+private var askedBatteryThisLaunch = false
 
 class Toast(val text: String, val action: String? = null, val onAction: (() -> Unit)? = null, val id: Long = System.nanoTime())
 
@@ -187,6 +199,28 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
         }
     }
 
+    // A channel's page, over Home or search.
+    var channel by remember { mutableStateOf<app.earful.ui.channel.ChannelRef?>(null) }
+    val channelMotion = remember { app.earful.ui.channel.ChannelMotion() }
+    fun openChannel(v: Video) {
+        keyboard?.hide()
+        val ref = app.earful.ui.channel.ChannelRef(v.channelUrl, v.channel, v.channelAvatar, v)
+        scope.launch {
+            if (sheet.isExpanded) sheet.collapse()
+            if (channel != null) { channelMotion.close() }
+            channel = ref
+            channelMotion.shown.snapTo(0f)
+            channelMotion.open()
+        }
+    }
+    fun closeChannel() {
+        if (channel == null) return
+        scope.launch { channelMotion.close(); channel = null }
+    }
+    val channelActions = remember {
+        app.earful.ui.components.ChannelActions(open = { openChannel(it) }, listenLive = { play(it) })
+    }
+
     LaunchedEffect(signals.playRequest) { signals.playRequest?.let { play(it); signals.playRequest = null } }
     LaunchedEffect(signals.openPlayer, np != null) {
         if (signals.openPlayer > 0 && np != null) { signals.openPlayer = 0; sheet.expand() }
@@ -206,13 +240,79 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
             }
     }
 
+    // Some phones stop "background" apps after a while, music or not. Once something has played
+    // and the player is tucked away, ask (at most once per launch, three times in all) to be
+    // left alone. Android shows its own yes/no; nothing changes without it.
+    LaunchedEffect(Unit) {
+        snapshotFlow { conn.state.value?.playing == true && sheet.progress.value < 0.01f }
+            .distinctUntilChanged()
+            .collect { docked ->
+                if (!docked) return@collect
+                val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                if (pm.isIgnoringBatteryOptimizations(ctx.packageName)) return@collect
+                val prefs = ctx.getSharedPreferences("ui", Context.MODE_PRIVATE)
+                val asked = prefs.getInt("asked_battery", 0)
+                if (asked >= 3 || askedBatteryThisLaunch) return@collect
+                delay(1500)
+                if (conn.state.value?.playing != true) return@collect
+                askedBatteryThisLaunch = true
+                prefs.edit().putInt("asked_battery", asked + 1).apply()
+                toast = Toast("Keep playing with the screen off?", "Allow", onAction = {
+                    runCatching {
+                        ctx.startActivity(
+                            android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                .setData(android.net.Uri.parse("package:" + ctx.packageName))
+                        )
+                    }.onFailure {
+                        runCatching { ctx.startActivity(android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+                    }
+                })
+            }
+    }
+
     StatusBarFollowsSheet(sheet)
+
+    val playerUp by remember { derivedStateOf { conn.state.value != null && (sheet.progress.value > 0.3f || sheet.direct) } }
+
+    // Leaving search with the keyboard up, straight back to Home: the mini player rides the
+    // keyboard down and lands on the tab bar the way it does when you minimise it, with a dip and
+    // a ripple on the water where it touches.
+    val view = LocalView.current
+    LaunchedEffect(Unit) {
+        var prev = keyboardRide.floatValue
+        var prevT = 0L
+        snapshotFlow { keyboardRide.floatValue }.collect { r ->
+            val now = System.nanoTime()
+            val dock = with(density) { bottomBar.toPx() }
+            if (prev > dock + 1f && r <= dock + 1f && !searchOpen && conn.state.value != null &&
+                sheet.progress.value < 0.01f && sheet.dismiss.value == 0f
+            ) {
+                val unit = density.density
+                val dt = ((now - prevT) / 1e9f).coerceIn(0.004f, 0.05f)
+                val speed = (prev - r) / dt / unit // dp/s
+                water.ripple(view.width / 2f, (3f + speed / 400f).coerceIn(3.5f, 7f) * unit, 70f * unit, 11f * unit, 1.1f)
+            }
+            prev = r; prevT = now
+        }
+    }
 
     // How far the player is open (0 while there's none).
     fun playerOpen() = if (np != null) sheet.progress.value.coerceIn(0f, 1f) else 0f
 
-    CompositionLocalProvider(app.earful.ui.components.LocalQueuedIds provides queuedIds) {
-    Box(Modifier.fillMaxSize().background(p.bg)) {
+    CompositionLocalProvider(
+        app.earful.ui.components.LocalQueuedIds provides queuedIds,
+        app.earful.ui.components.LocalChannelActions provides channelActions,
+    ) {
+    // The black hole (±10 s past +2000 s) shakes all of it, bends the light of all of it, and
+    // eats it layer by layer (see ui/hole). None of this costs anything until then.
+    Box(Modifier.fillMaxSize().graphicsLayer { translationX = Hole.shakeX; translationY = Hole.shakeY }) {
+    Box(Modifier.fillMaxSize().graphicsLayer {
+        Hole.frame
+        renderEffect = if (Hole.isActive) HoleLens.effect(size.width, size.height) else null
+    }) {
+    StarField()
+    // (the app's own background goes with the bottom page, leaving the stars)
+    Box(Modifier.fillMaxSize().drawBehind { if (!Hole.gone(HoleLayer.Page)) drawRect(p.bg) }) {
         HorizontalPager(
             state = pager,
             modifier = Modifier.fillMaxSize().graphicsLayer {
@@ -223,21 +323,33 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
                 val hu = search.homeUnder.value
                 val s = (1f - 0.06f * hu) * (1f - 0.03f * q)
                 scaleX = s; scaleY = s
-                alpha = 1f - 0.5f * hu
                 // Fully covered (by the player, or by search's own background): not drawn at all.
-                if ((q > 0.999f && !sheet.water.dragging) || search.bg.value > 0.999f) alpha = 0f
+                // (Dimming is a veil drawn over it, never alpha: alpha on a whole page means
+                // painting it off-screen first, every frame — the stutter on cheaper phones.)
+                alpha = if (!Hole.isActive && ((q > 0.999f && !sheet.water.dragging) || search.bg.value > 0.999f || channelMotion.shown.value > 0.999f)) 0f else 1f
+            }.drawWithContent {
+                drawContent()
+                if (Hole.isActive) return@drawWithContent
+                val hu = search.homeUnder.value
+                if (hu > 0f) drawRect(p.bg, alpha = 0.5f * hu)
+                val ch = channelMotion.shown.value
+                if (ch > 0f && !searchOpen) drawRect(Color.Black, alpha = 0.25f * ch.coerceIn(0f, 1f))
             },
             beyondViewportPageCount = 1, // the other page is already laid out: swipes never stutter
             key = { it },
         ) { page ->
           // Depth while swiping: the page you're leaving settles back and dims a little, like
           // a card sliding under the next one, instead of two flat pages scrolling side by side.
-          Box(Modifier.fillMaxSize().graphicsLayer {
+          Box(Modifier.fillMaxSize().eatable(page = true, fill = p.bg).graphicsLayer {
               val off = ((pager.currentPage - page) + pager.currentPageOffsetFraction)
               val a = kotlin.math.abs(off).coerceIn(0f, 1f)
               val s = 1f - 0.05f * a
               scaleX = s; scaleY = s
-              alpha = 1f - 0.3f * a
+          }.drawWithContent {
+              drawContent()
+              val off = ((pager.currentPage - page) + pager.currentPageOffsetFraction)
+              val a = kotlin.math.abs(off).coerceIn(0f, 1f)
+              if (a > 0f) drawRect(p.bg, alpha = 0.3f * a)
           }) {
             when (page) {
                 0 -> HomeScreen(
@@ -253,12 +365,22 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
           }
         }
         // The pages darken a little as the player rises over them.
-        if (np != null) Box(Modifier.fillMaxSize().graphicsLayer { alpha = 0.18f * playerOpen() }.background(Color.Black))
+        if (np != null) Box(Modifier.fillMaxSize().graphicsLayer { alpha = if (Hole.isActive) 0f else 0.18f * playerOpen() }.background(Color.Black))
 
         if (search.shown) {
-            SearchScreen(contentBottom, search, onPlay = ::play, onQueue = ::enqueue, onClose = ::closeSearch)
+            SearchScreen(contentBottom, search, onPlay = ::play, onQueue = ::enqueue, onClose = ::closeSearch, playerUp = playerUp)
         }
         SearchMorph(search)
+
+        channel?.let { ref ->
+            app.earful.ui.channel.ChannelScreen(
+                ref, contentBottom, onPlay = ::play, onQueue = ::enqueue, onClose = ::closeChannel,
+                modifier = Modifier.graphicsLayer {
+                    translationX = (1f - channelMotion.shown.value) * size.width
+                    shadowElevation = if (channelMotion.shown.value < 1f) 24.dp.toPx() else 0f
+                },
+            )
+        }
 
         toast?.let { t ->
             ToastPill(t, Modifier.align(Alignment.BottomCenter).padding(bottom = contentBottom + 12.dp)) { toast = null }
@@ -290,13 +412,18 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
             },
         ) { t ->
             // Tapping Home while already on Home just glides back to the top (no reload).
-            if (t == Tab.Home && tab == Tab.Home) homeTopSignal++ else goTo(t)
+            if (channel != null) { closeChannel(); goTo(t) }
+            else if (t == Tab.Home && tab == Tab.Home) homeTopSignal++ else goTo(t)
         }
+    }
+    }
+    HoleOverlay()
     }
     }
 
     BackHandler(enabled = searchOpen && !sheet.isExpanded) { closeSearch() }
     BackHandler(enabled = !searchOpen && tab != Tab.Home && !sheet.isExpanded) { goTo(Tab.Home) }
+    BackHandler(enabled = channel != null && !sheet.isExpanded) { closeChannel() }
     // Predictive back drags the player down with your thumb, exactly like pulling it.
     PredictiveBackHandler(enabled = np != null && sheet.isExpanded) { events ->
         sheet.water.dragStart()
@@ -312,6 +439,8 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     }
     // With "Up next" open, Back closes just the queue.
     BackHandler(enabled = np != null && sheet.isQueueOpen) { scope.launch { sheet.closeQueue(tapped = true) } }
+    // While the black hole is open, Back does nothing (stop tapping and it gives everything back).
+    BackHandler(enabled = Hole.isActive) { }
 }
 
 @Composable

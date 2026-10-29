@@ -1,5 +1,6 @@
 package app.earful.ui.components
 
+import app.earful.ui.hole.eatable
 import androidx.compose.animation.core.Animatable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -62,6 +63,7 @@ fun VideoCard(video: Video, saved: Boolean, onOpen: () -> Unit, onToggleSave: ()
     val p = LocalPalette.current
     Column(
         modifier
+            .eatable()
             .fillMaxWidth()
             .pressable(scaleTo = 0.975f, label = "Listen", onClick = onOpen)
             .padding(horizontal = 16.dp, vertical = 10.dp)
@@ -71,11 +73,19 @@ fun VideoCard(video: Video, saved: Boolean, onOpen: () -> Unit, onToggleSave: ()
             DurationBadge(video.durationSec, Modifier.align(Alignment.BottomEnd).padding(8.dp))
         }
         Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.Top) {
-            RemoteImage(video.channelAvatar, Modifier.size(36.dp).clip(CircleShape), sizePx = 108)
+            // The logo opens the channel (or, while it's live, tunes in).
+            ChannelLogo(video, 36.dp, sizePx = 108)
             Column(Modifier.weight(1f).padding(start = 12.dp, end = 4.dp)) {
                 Text(video.title, Type.subheadStrong, maxLines = 2)
                 Spacer(Modifier.height(4.dp))
-                Text(Format.meta(video.channel, video.views, video.uploaded), Type.footnote, color = p.secondary, maxLines = 1)
+                // The line under the title starts with the channel's name: tapping it opens the channel.
+                val actions = LocalChannelActions.current
+                Text(
+                    Format.meta(video.channel, video.views, video.uploaded),
+                    Type.footnote.copy(textDirection = androidx.compose.ui.text.style.TextDirection.Ltr),
+                    color = p.secondary, maxLines = 1,
+                    modifier = Modifier.pressable(scaleTo = 0.97f, label = "Open channel") { actions.open(video) },
+                )
             }
             Column {
                 SaveButton(saved, onToggleSave, tint = p.secondary, hit = 40)
@@ -91,6 +101,7 @@ fun VideoRow(video: Video, saved: Boolean, onOpen: () -> Unit, onToggleSave: () 
     val p = LocalPalette.current
     Row(
         modifier
+            .eatable()
             .fillMaxWidth()
             .pressable(scaleTo = 0.98f, onClick = onOpen)
             .padding(horizontal = 16.dp, vertical = 8.dp),

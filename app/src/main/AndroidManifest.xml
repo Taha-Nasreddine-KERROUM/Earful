@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Lets the app ask (once, with Android's own yes/no) not to be stopped while it plays in the background. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!-- Lets Earful hand its own updates to Android's installer (you still confirm each one). -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 

@@ -1,5 +1,6 @@
 package app.earful.ui.player
 
+import app.earful.ui.hole.eatable
 import android.os.SystemClock
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.AnimationVector1D
@@ -235,6 +236,7 @@ fun QueuePanel(
     val path = remember { Path() }
     Column(
         modifier
+            .eatable(page = true)
             .fillMaxWidth()
             .height(with(density) { panelHeight.toDp() } + lip)
             .offset { IntOffset(0, ((1f - open.value) * panelHeight).roundToInt()) }
@@ -295,7 +297,7 @@ fun QueuePanel(
                     order = { i - list.firstVisibleItemIndex },
                     onTap = { if (!e.current) onJump(e.index) },
                     onRemove = { onRemove(e.index) },
-                    modifier = Modifier.animateItem(),
+                    modifier = Modifier.animateItem().eatable(),
                 )
             }
             if (queue.entries.none { !it.passed && !it.current }) item(key = "empty") {
@@ -548,6 +550,10 @@ private fun NowPlayingBars(playing: Boolean, soundPosition: () -> Long) {
     val rest = remember { floatArrayOf(8f / 14f, 1f, 10f / 14f) }
     val h = remember { floatArrayOf(8f / 14f, 1f, 10f / 14f) }
     var tick by remember { mutableLongStateOf(0L) }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        app.earful.playback.SoundLevels.watchers++
+        onDispose { app.earful.playback.SoundLevels.watchers-- }
+    }
     LaunchedEffect(playing) {
         val raw = FloatArray(3)
         val peak = floatArrayOf(0.02f, 0.02f, 0.01f)

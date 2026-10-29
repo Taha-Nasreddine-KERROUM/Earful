@@ -111,6 +111,11 @@ object Format {
 
     private fun trim(d: Double) = if (d >= 10) d.toLong().toString() else "%.1f".format(d).removeSuffix(".0")
 
+    /**
+     * "Channel · 1.2M views · 3 days ago". The channel's name is set apart (Unicode isolate), so a
+     * name in Arabic or Hebrew reads right to left on its own without flipping the rest of the
+     * line: the line always reads like English, name first.
+     */
     fun meta(channel: String, views: Long, uploaded: String?) =
-        listOfNotNull(channel.ifEmpty { null }, views(views), uploaded?.ifEmpty { null }).joinToString(" · ")
+        listOfNotNull(channel.ifEmpty { null }?.let { "\u2068$it\u2069" }, views(views), uploaded?.ifEmpty { null }).joinToString(" · ")
 }

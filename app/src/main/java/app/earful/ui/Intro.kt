@@ -28,6 +28,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -51,6 +52,8 @@ import kotlin.math.abs
  */
 object Intro {
     var covering by mutableStateOf(false)
+    /** The opening hides the app completely (so the app isn't drawn at all underneath it). */
+    var hidesApp by mutableStateOf(false)
     /** Top-left of the Home logo (its bars and word), in the window. */
     var anchor: Offset? = null
 
@@ -77,13 +80,14 @@ fun OpeningLogo(onDone: () -> Unit) {
     var skip by remember { mutableStateOf(false) }
     val easeInOut = remember { CubicBezierEasing(0.65f, 0f, 0.35f, 1f) }
 
-    LaunchedEffect(Unit) { Intro.covering = true }
+    remember { Intro.covering = true; Intro.hidesApp = true; 0 }
     LaunchedEffect(skip) {
         if (skip) {
             // straight to the end of the breath and the unfold, then the glide
             bars.forEach { launch { it.animateTo(1f, tween(160)) } }
             markIn.snapTo(1f)
             unfold.animateTo(1f, tween(220, easing = easeInOut))
+            Intro.hidesApp = false
             glide.animateTo(1f, spring(dampingRatio = 0.9f, stiffness = 320f))
             Intro.covering = false
             onDone()
@@ -105,10 +109,12 @@ fun OpeningLogo(onDone: () -> Unit) {
         unfold.animateTo(1f, tween(550, easing = easeInOut))
         delay(200)
         // into the Home logo's place; Home appears around it
+        Intro.hidesApp = false
         glide.animateTo(1f, spring(dampingRatio = 0.85f, stiffness = 200f))
         Intro.covering = false
         onDone()
     }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { Intro.covering = false; Intro.hidesApp = false } }
 
     BoxWithConstraints(
         Modifier.fillMaxSize()
@@ -118,7 +124,11 @@ fun OpeningLogo(onDone: () -> Unit) {
         val W = constraints.maxWidth.toFloat()
         val H = constraints.maxHeight.toFloat()
         // the page behind fades in as the logo travels
-        Box(Modifier.fillMaxSize().graphicsLayer { alpha = 1f - ((glide.value * 1.6f) - 0.3f).coerceIn(0f, 1f) }.background(p.bg))
+        // (one flat colour: faded by tinting it, never by painting the whole screen off to the side first)
+        Box(Modifier.fillMaxSize().drawBehind {
+            val a = 1f - ((glide.value * 1.6f) - 0.3f).coerceIn(0f, 1f)
+            if (a > 0f) drawRect(p.bg, alpha = a)
+        })
 
         // The logo, laid out exactly like Home's, then moved and scaled as a whole.
         Row(
