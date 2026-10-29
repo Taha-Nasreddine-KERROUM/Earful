@@ -56,7 +56,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Outline
+import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.graphics.BlurEffect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -80,6 +87,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import app.earful.data.Library
+import app.earful.data.VideoShapes
 import app.earful.playback.AudioCache
 import app.earful.playback.NowPlaying
 import app.earful.playback.PlaybackEvents
@@ -90,7 +98,6 @@ import app.earful.ui.components.Icon
 import app.earful.ui.components.Icons
 import app.earful.ui.components.RemoteImage
 import app.earful.ui.components.SaveButton
-import app.earful.ui.components.SkipIcon
 import app.earful.ui.components.Text
 import app.earful.ui.components.TideShape
 import app.earful.ui.components.Water
@@ -542,6 +549,11 @@ fun PlayerSheet(
     LaunchedEffect(hasQueue) { if (!hasQueue && sheet.queue.value > 0f) sheet.closeQueue() }
     // Horizontal swipe on Now Playing: the artwork follows your finger to the next/previous video.
     val swipe = remember { Animatable(0f) }
+    // Replaying the last video (the rewind plays over the picture, the bar and the button).
+    val rewind = remember { Rewind() }
+    // The picture's real shape (YouTube gives each video's width and height); 16:9 until known.
+    val shapes by VideoShapes.map.collectAsStateWithLifecycle()
+    val artShape = animateFloatAsState(shapes[np.video.id] ?: VideoShapes.WIDE, Motion.spread(), label = "shape")
     val error by PlaybackEvents.error.collectAsStateWithLifecycle()
     val savedList by Library.saved.collectAsStateWithLifecycle()
     val saved = savedList.any { it.id == np.video.id }
@@ -609,18 +621,26 @@ fun PlayerSheet(
         val miniArtH = MiniArtH.px()
         val miniArt = Rect(8.dp.px(), (miniH - miniArtH) / 2, miniArtH * 16f / 9f, miniArtH)
         // Portrait: controls are anchored to the bottom (thumb zone); the artwork floats centred
-        // in whatever space is left above them, so every screen height looks composed.
-        val fullArt = if (!landscape) {
-            val regionTop = statusTop.px() + 40.dp.px()
-            val regionBottom = H - controlsH - 12.dp.px()
-            val region = (regionBottom - regionTop).coerceAtLeast(120.dp.px())
-            val aw = minOf(W - 48.dp.px(), region * 16f / 9f)
-            val ah = aw * 9f / 16f
+        // in whatever space is left above them, so every screen height looks composed. It takes
+        // the video's own shape there (wide, 4:3, square…), fitted inside the same space; the mini
+        // player and everything else stay 16:9.
+        val regionTop = statusTop.px() + 40.dp.px()
+        val region = (H - controlsH - 12.dp.px() - regionTop).coerceAtLeast(120.dp.px())
+        val landAh = minOf(H - statusTop.px() - navBottom.px() - 64.dp.px(), W * 0.46f * 9f / 16f)
+        fun fullArtFor(ratio: Float): Rect = if (!landscape) {
+            var aw = minOf(W - 48.dp.px(), region * ratio)
+            var ah = aw / ratio
+            if (ah > region) { ah = region; aw = ah * ratio }
             Rect((W - aw) / 2, regionTop + (region - ah) * 0.42f, aw, ah) // optical centre sits a bit high
         } else {
-            val ah = minOf(H - statusTop.px() - navBottom.px() - 64.dp.px(), W * 0.46f * 9f / 16f)
-            Rect(32.dp.px(), (H - ah) / 2, ah * 16f / 9f, ah)
+            // the 16:9 slot beside the controls; other shapes fit inside it
+            val slotW = landAh * 16f / 9f
+            var aw = minOf(slotW, landAh * ratio)
+            var ah = aw / ratio
+            if (ah > landAh) { ah = landAh; aw = ah * ratio }
+            Rect(32.dp.px() + (slotW - aw) / 2, (H - ah) / 2, aw, ah)
         }
+        val fullArt = fullArtFor(VideoShapes.WIDE) // the 16:9 slot (lays out the controls beside it)
 
         val queuePanelH = (H * 0.74f).coerceAtLeast(320.dp.px())
         val queueRange = queuePanelH
@@ -892,36 +912,47 @@ fun PlayerSheet(
                             titleShift = { w.frame; w.float(1) }, // reading the frame redraws with the water
                             controlsShift = { w.frame; w.float(2) },
                             queueOpen = { sheet.queue.value },
+                            rewind = rewind,
                             modifier = controlsMod,
                         )
                     }
                 }
 
                 // Layer 5 — the artwork, travelling between both layouts. Laid out once at its full
-                // size and scaled down to the mini player's (both are 16:9), so it never re-lays out.
+                // size (in the video's own shape) and scaled down to the mini player's; the mini
+                // player shows the middle 16:9 of it, so the shape opens out as it rises.
                 Box(
                     Modifier
                         .layout { m, c ->
-                            val pl = m.measure(Constraints.fixed(fullArt.w.roundToInt(), fullArt.h.roundToInt()))
+                            val fa = fullArtFor(artShape.value)
+                            val pl = m.measure(Constraints.fixed(fa.w.roundToInt(), fa.h.roundToInt()))
                             // (reports the sheet's size, so the small mini sheet doesn't squeeze and re-centre it)
-                            layout(c.maxWidth, c.maxHeight) { pl.place(fullArt.x.roundToInt(), fullArt.y.roundToInt()) }
+                            layout(c.maxWidth, c.maxHeight) { pl.place(fa.x.roundToInt(), fa.y.roundToInt()) }
                         }
                         .graphicsLayer {
+                            val fa = fullArtFor(artShape.value)
                             val p = pNow()
                             val pa = if (sheet.direct) 1f else p // a direct open has the picture in place already
-                            val art = miniArt.lerpTo(fullArt, pa)
+                            val art = miniArt.lerpTo(fa, pa)
                             val breathe = lerp(1f, artScale.value, pa)
-                            val s = art.w / fullArt.w * breathe
-                            scaleX = s; scaleY = s // about its centre
-                            translationX = art.x + art.w / 2f - (fullArt.x + fullArt.w / 2f) + swipe.value
-                            translationY = art.y + art.h / 2f - (fullArt.y + fullArt.h / 2f) + held() +
+                            // scaled about its centre just enough to cover the window it shows through
+                            val s = max(art.w / fa.w, art.h / fa.h) * breathe
+                            scaleX = s; scaleY = s
+                            val e = rewind.roll.value
+                            val shiver = if (e > 0f && e < 1f) sin(e * 60f) * (1f - e) * 5.dp.toPx() else 0f
+                            translationX = art.x + art.w / 2f - (fa.x + fa.w / 2f) + swipe.value + shiver
+                            translationY = art.y + art.h / 2f - (fa.y + fa.h / 2f) + held() +
                                 w.float(0) * (p * 2f).coerceIn(0f, 1f)
                             alpha = 1f - (abs(swipe.value) / W * 0.7f).coerceIn(0f, 0.7f)
                             shadowElevation = lerp(0f, 22.dp.toPx(), pa) * breathe
-                            // the corner is drawn before the scaling, so it's sized up to look right after it
-                            shape = RoundedCornerShape(lerp(6.dp.toPx(), 12.dp.toPx(), pa) / s.coerceAtLeast(0.05f))
+                            // the window and its corner are drawn before the scaling, so they're sized up
+                            shape = Window(art.w * breathe / s, art.h * breathe / s, lerp(6.dp.toPx(), 12.dp.toPx(), pa) / s.coerceAtLeast(0.05f))
                             clip = true
                             ambientShadowColor = Color.Black; spotShadowColor = Color.Black
+                            if (Build.VERSION.SDK_INT >= 31 && e > 0f && e < 1f) {
+                                val b = (1f - e) * 2.dp.toPx()
+                                renderEffect = if (b > 0.3f) BlurEffect(b, b, TileMode.Decal) else null
+                            } else renderEffect = null
                         }
                         .background(Color(0xFF2C2C2E))
                 ) {
@@ -1027,8 +1058,10 @@ private fun NowPlayingControls(
     titleShift: () -> Float,
     controlsShift: () -> Float,
     queueOpen: () -> Float,
+    rewind: Rewind,
     modifier: Modifier,
 ) {
+    val scope = rememberCoroutineScope()
     Column(modifier) {
         Row(Modifier.graphicsLayer { translationY = titleShift() }, verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f).padding(end = 12.dp)) {
@@ -1046,7 +1079,8 @@ private fun NowPlayingControls(
         Column(Modifier.graphicsLayer { translationY = controlsShift() }) {
             Spacer(Modifier.height(26.dp))
             val ads by PlaybackEvents.ads.collectAsStateWithLifecycle()
-            Scrubber(positionMs, np.durationMs, downloaded, onSeek = conn::seekTo, ads = ads[np.video.id].orEmpty())
+            val shownMs = rewind.shown?.let { (it * np.durationMs).toLong() } ?: positionMs
+            Scrubber(shownMs, np.durationMs, downloaded, onSeek = conn::seekTo, ads = ads[np.video.id].orEmpty(), follow = rewind.shown != null)
             Spacer(Modifier.height(18.dp))
             Row(
                 Modifier.fillMaxWidth(),
@@ -1054,9 +1088,16 @@ private fun NowPlayingControls(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 SkipButton(forward = false) { conn.seekBy(-10_000) }
-                CircleButton(onClick = { conn.togglePlay() }, size = 92.dp, enabled = !np.ended,
-                    label = if (np.playing) "Pause" else "Play") {
-                    PlayPauseGlyph(showPause = np.playing || (np.waiting && error == null), ended = np.ended, tint = Color.White, size = 56.dp)
+                val ending = np.ended || rewind.running
+                CircleButton(
+                    onClick = { if (ending) scope.launch { rewind.play(conn) } else conn.togglePlay() },
+                    size = 92.dp,
+                    label = if (ending) "Play again" else if (np.playing) "Pause" else "Play",
+                ) {
+                    PlayPauseGlyph(
+                        showPause = np.playing || (np.waiting && error == null), ended = ending,
+                        tint = Color.White, size = 56.dp, replay = true, spin = { rewind.spin.value },
+                    )
                 }
                 SkipButton(forward = true) { conn.seekBy(10_000) }
             }
@@ -1103,7 +1144,6 @@ private fun StatusLine(np: NowPlaying, downloaded: Float, justSaved: Boolean, er
             }
             !complete && downloaded > 0f -> Text("Saving for offline · ${(downloaded * 100).toInt()}%", Type.footnote.copy(fontFeatureSettings = "tnum"), color = dim)
             np.waiting -> Text("Loading…", Type.footnote, color = dim)
-            np.ended -> Text("Finished · double‑tap left to go back", Type.footnote, color = dim)
         }
     }
 }
@@ -1147,59 +1187,75 @@ private fun UpNextButton(upcoming: Int, enabled: Boolean, onClick: () -> Unit) {
     }
 }
 
-/**
- * ±10 s. The arrow turns the way time moves, like nudging a dial, and the amount floats up off the
- * button. Tapping again quickly adds up ("+20 s"), so a few taps read as one move.
- */
 @Composable
-private fun SkipButton(forward: Boolean, onSkip: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    val turn = remember { Animatable(0f) }
-    val float = remember { Animatable(0f) }
-    var total by remember { mutableStateOf(0) }
-    var lastTap by remember { mutableStateOf(0L) }
-    Box(contentAlignment = Alignment.Center) {
-        CircleButton(
-            onClick = {
-                onSkip()
-                val now = System.currentTimeMillis()
-                total = if (now - lastTap < 900) total + 10 else 10
-                lastTap = now
-                scope.launch { turn.snapTo(0f); turn.animateTo(1f, tween(120)); turn.animateTo(0f, Motion.lively()) }
-                scope.launch { float.snapTo(0f); float.animateTo(1f, tween(750, easing = FastOutSlowInEasing)) }
-            },
-            size = 72.dp,
-            label = if (forward) "Forward 10 seconds" else "Back 10 seconds",
-        ) {
-            SkipIcon(10, forward = forward, tint = Color.White, size = 38.dp,
-                modifier = Modifier.graphicsLayer { rotationZ = turn.value * if (forward) 38f else -38f })
-        }
-        if (float.value in 0.001f..0.999f) {
-            Text(
-                (if (forward) "+" else "−") + total + " s",
-                Type.footnote.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, fontFeatureSettings = "tnum"),
-                color = Color.White,
-                modifier = Modifier.align(Alignment.TopCenter).graphicsLayer {
-                    translationY = -float.value * 22.dp.toPx()
-                    alpha = if (float.value < 0.2f) float.value / 0.2f else 1f - (float.value - 0.2f) / 0.8f
-                },
-            )
-        }
-    }
-}
-
-@Composable
-fun PlayPauseGlyph(showPause: Boolean, ended: Boolean, tint: Color, size: Dp) {
+fun PlayPauseGlyph(
+    showPause: Boolean,
+    ended: Boolean,
+    tint: Color,
+    size: Dp,
+    /** At the end, show the replay arrow instead of a dimmed play. */
+    replay: Boolean = false,
+    /** Extra turn of the replay arrow (degrees), read while drawing. */
+    spin: () -> Float = { 0f },
+) {
+    val showReplay = replay && ended
     val t by animateFloatAsState(if (showPause && !ended) 1f else 0f, Motion.snappy(), label = "pp")
-    val dim = if (ended) 0.35f else 1f
+    val r by animateFloatAsState(if (showReplay) 1f else 0f, Motion.snappy(), label = "replay")
+    val dim = if (ended && !replay) 0.35f else 1f
     Box(contentAlignment = Alignment.Center) {
         // A quarter-turn swap, like flipping a switch: one glyph turns away as the other turns in.
         Icon(Icons.Play, tint, size = size, modifier = Modifier.graphicsLayer {
-            alpha = (1f - t) * dim; scaleX = 0.6f + 0.4f * (1f - t); scaleY = scaleX; rotationZ = -45f * t
+            val a = (1f - t - r).coerceIn(0f, 1f)
+            alpha = a * dim; scaleX = 0.6f + 0.4f * a; scaleY = scaleX; rotationZ = -45f * t + 45f * r
         })
         Icon(Icons.Pause, tint, size = size, modifier = Modifier.graphicsLayer {
-            alpha = t; scaleX = 0.6f + 0.4f * t; scaleY = scaleX; rotationZ = 45f * (1f - t)
+            alpha = t; scaleX = 0.6f + 0.4f * t; scaleY = scaleX; rotationZ = 90f * (1f - t)
         })
+        if (replay) Icon(Icons.Replay, tint, size = size, modifier = Modifier.graphicsLayer {
+            alpha = r; scaleX = 0.6f + 0.4f * r; scaleY = scaleX; rotationZ = -90f * (1f - r) + spin()
+        })
+    }
+}
+
+/**
+ * Playing the last video again, like rewinding a tape: the arrow spins backwards and slows down,
+ * the picture shivers back, the time rolls down to 0:00, the bar snaps to the start with a small
+ * bounce, then it plays.
+ */
+@Stable
+internal class Rewind {
+    /** 0..1 through the roll back (drives the picture's shiver). */
+    val roll = Animatable(0f)
+    val spin = Animatable(0f)
+    var running by mutableStateOf(false)
+    /** What the progress bar shows meanwhile (0..1 of the video), null when it shows the real time. */
+    var shown by mutableStateOf<Float?>(null)
+
+    suspend fun play(conn: PlayerConnection) = coroutineScope {
+        if (running) return@coroutineScope
+        running = true
+        try {
+            spin.snapTo(0f)
+            launch { spin.animateTo(-1080f, tween(900, easing = Motion.outCubic)) }
+            roll.snapTo(0f)
+            roll.animateTo(1f, tween(900, easing = androidx.compose.animation.core.LinearEasing)) {
+                val e = value
+                shown = 1f - (if (e < 0.5f) 4f * e * e * e else 1f - (-2f * e + 2f).let { it * it * it } / 2f)
+            }
+            conn.replay()
+            val bounce = Animatable(-0.03f)
+            bounce.animateTo(0f, androidx.compose.animation.core.spring(dampingRatio = 0.4f, stiffness = 500f)) {
+                shown = value.coerceAtLeast(0f) // it overshoots the start a little and springs back
+            }
+            // hand the bar back once the player is really at the start
+            var waited = 0
+            while (conn.positionMs() > 2_000 && waited < 20) { delay(50); waited++ }
+            delay(260)
+        } finally {
+            shown = null
+            roll.snapTo(0f)
+            running = false
+        }
     }
 }
 
@@ -1252,6 +1308,15 @@ private fun Backdrop(url: String, modifier: Modifier) {
                 Brush.verticalGradient(listOf(Color(0x47000000), Color(0x73000000), Color(0xA6000000)))
             )
         )
+    }
+}
+
+/** A rounded window of [w]×[h] in the middle of the picture: what of it shows right now. */
+private class Window(val w: Float, val h: Float, val r: Float) : Shape {
+    override fun createOutline(size: Size, layoutDirection: LayoutDirection, density: Density): Outline {
+        val l = (size.width - w) / 2f
+        val t = (size.height - h) / 2f
+        return Outline.Rounded(RoundRect(l, t, l + w, t + h, CornerRadius(r)))
     }
 }
 

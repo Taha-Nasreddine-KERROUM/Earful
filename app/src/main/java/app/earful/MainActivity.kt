@@ -13,6 +13,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import app.earful.ui.AppRoot
 import app.earful.ui.AppSignals
+import app.earful.ui.OpeningLogo
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import app.earful.ui.theme.EarfulTheme
 
 class MainActivity : ComponentActivity() {
@@ -24,7 +32,19 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         conn = PlayerConnection(applicationContext)
         handle(intent)
-        setContent { EarfulTheme { AppRoot(conn, signals) } }
+        // The opening plays when the app is started fresh from its icon (not when it comes back
+        // after turning the phone, or opens straight onto the player from the notification).
+        val opening = savedInstanceState == null && intent?.action == Intent.ACTION_MAIN &&
+            intent?.getBooleanExtra(EXTRA_OPEN_PLAYER, false) != true
+        setContent {
+            EarfulTheme {
+                Box(Modifier.fillMaxSize()) {
+                    AppRoot(conn, signals)
+                    var showOpening by rememberSaveable { mutableStateOf(opening) }
+                    if (showOpening) OpeningLogo { showOpening = false }
+                }
+            }
+        }
         // Updates: one quiet check when the app is opened fresh (not when you just switch back to
         // it), then once an hour while it stays open on screen. It runs off the main thread a few
         // seconds after launch, so it never slows the app down or gets in your way.

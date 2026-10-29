@@ -61,6 +61,8 @@ fun Scrubber(
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
     ads: List<app.earful.data.AdSegment> = emptyList(),
+    /** Follow [positionMs] exactly, frame by frame (it's being animated by someone else). */
+    follow: Boolean = false,
 ) {
     val view = LocalView.current
     val scope = rememberCoroutineScope()
@@ -80,7 +82,7 @@ fun Scrubber(
     // where you went; normal playback and dragging stay 1:1 (no animation, no extra frames).
     val shown = remember { androidx.compose.animation.core.Animatable(target) }
     LaunchedEffect(target, dragging) {
-        if (!dragging && kotlin.math.abs(target - shown.value) > 0.015f) shown.animateTo(target, Motion.sheet())
+        if (!dragging && !follow && kotlin.math.abs(target - shown.value) > 0.015f) shown.animateTo(target, Motion.sheet())
         else shown.snapTo(target)
     }
     val fraction = shown.value

@@ -53,6 +53,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.positionInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -331,10 +333,16 @@ fun Wordmark(beat: Int = 0) {
             }
         }
     }
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        Modifier
+            // the opening lands on this spot; until it has, this one stays hidden under it
+            .onGloballyPositioned { app.earful.ui.Intro.anchor = it.positionInRoot() }
+            .graphicsLayer { alpha = if (app.earful.ui.Intro.covering) 0f else 1f },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         // Five bars, like the app icon: a waveform that reads as "listen" at a glance.
         Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-            listOf(7, 13, 18, 11, 6).forEachIndexed { i, h ->
+            app.earful.ui.Intro.BARS.forEachIndexed { i, h ->
                 Box(Modifier.width(3.dp).height(h.dp).graphicsLayer { scaleY = bars[i].value }
                     .clip(RoundedCornerShape(2.dp)).background(p.accent))
             }

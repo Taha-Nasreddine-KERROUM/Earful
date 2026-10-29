@@ -7,4 +7,5 @@
         <item name="android:colorAccent">@color/accent</item>
     </style>
     <color name="bg">#FF000000</color>
+    <color name="accent">#FFFF375F</color>
 </resources>

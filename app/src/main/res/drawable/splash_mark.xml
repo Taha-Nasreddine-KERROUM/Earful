@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The in-app logo's five bars, three times their size, for the system opening screen (Android 12+).
+     Not the launcher icon: that one is unchanged. 288 dp canvas, bars 9 dp wide, 6 dp apart. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="288dp" android:height="288dp"
+    android:viewportWidth="288" android:viewportHeight="288">
+    <path android:fillColor="@color/accent" android:pathData="M109.5,138 a4.5,4.5 0 0 1 9,0 v12 a4.5,4.5 0 0 1 -9,0 z" />
+    <path android:fillColor="@color/accent" android:pathData="M124.5,129 a4.5,4.5 0 0 1 9,0 v30 a4.5,4.5 0 0 1 -9,0 z" />
+    <path android:fillColor="@color/accent" android:pathData="M139.5,121.5 a4.5,4.5 0 0 1 9,0 v45 a4.5,4.5 0 0 1 -9,0 z" />
+    <path android:fillColor="@color/accent" android:pathData="M154.5,132 a4.5,4.5 0 0 1 9,0 v24 a4.5,4.5 0 0 1 -9,0 z" />
+    <path android:fillColor="@color/accent" android:pathData="M169.5,139.5 a4.5,4.5 0 0 1 9,0 v9 a4.5,4.5 0 0 1 -9,0 z" />
+</vector>

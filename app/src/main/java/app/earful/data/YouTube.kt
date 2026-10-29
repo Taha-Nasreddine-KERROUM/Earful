@@ -83,6 +83,11 @@ object YouTube {
         val info = StreamInfo.getInfo(service, "https://www.youtube.com/watch?v=$videoId")
         val audio = pickAudio(info.audioStreams)
             ?: error("This video has no audio we can play")
+        // its real shape, for the full player's picture (already part of this answer: no extra data)
+        (info.videoOnlyStreams.orEmpty() + info.videoStreams.orEmpty())
+            .filter { it.width > 0 && it.height > 0 }
+            .maxByOrNull { it.width.toLong() * it.height }
+            ?.let { VideoShapes.put(videoId, it.width, it.height) }
         val video = Video(
             id = videoId,
             title = info.name.orEmpty().ifEmpty { fallback?.title.orEmpty() },

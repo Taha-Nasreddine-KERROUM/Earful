@@ -2,6 +2,7 @@ package app.earful
 
 import android.app.Application
 import app.earful.data.Library
+import app.earful.data.VideoShapes
 import app.earful.data.Network
 import app.earful.data.YouTube
 import app.earful.playback.AudioCache
@@ -20,6 +21,7 @@ class EarfulApp : Application(), SingletonImageLoader.Factory {
         super.onCreate()
         YouTube.init()
         Library.init(this)
+        VideoShapes.init(this)
         Session.init(this)
         // Keeps the audio of a video you left open; deletes anything else left over.
         AudioCache.init(this, keep = Session.keepIds())

@@ -44,6 +44,8 @@ object Icons {
         }.build()
 
     val Play = icon("play", "M7.5 5.2v13.6c0 1 1.1 1.6 1.9 1l10.4-6.8c.8-.5.8-1.6 0-2.1L9.4 4.1c-.8-.5-1.9.1-1.9 1.1z" to null)
+    /** Play again: an open circle turning back on itself. */
+    val Replay = icon("replay", "M5.2 13a7 7 0 1 0 2.1-5" to 2.3f, "M7.6 3.6 7.1 8.1 11.6 8.6" to 2.3f)
     val Pause = icon(
         "pause",
         "M7.2 4.5h2.6c.7 0 1.2.5 1.2 1.2v12.6c0 .7-.5 1.2-1.2 1.2H7.2c-.7 0-1.2-.5-1.2-1.2V5.7c0-.7.5-1.2 1.2-1.2z" to null,

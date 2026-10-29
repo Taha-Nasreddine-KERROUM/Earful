@@ -166,8 +166,15 @@ class PlayerConnection(private val context: Context) {
     }
 
     fun togglePlay() = withController { c ->
-        if (c.playbackState == Player.STATE_ENDED) return@withController // no replay, by design
+        if (c.playbackState == Player.STATE_ENDED) return@withController // the replay button does that
         if (c.playWhenReady) c.pause() else c.play()
+    }
+
+    /** The last video ended: play it again from the start. */
+    fun replay() = withController { c ->
+        PlaybackEvents.clearError()
+        c.seekTo(0)
+        c.play()
     }
 
     fun seekBy(deltaMs: Long) = withController { c ->
