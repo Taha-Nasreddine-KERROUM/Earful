@@ -34,6 +34,10 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        // Android 12+ shows the five bars itself first. The app's own bars take over in exactly the
+        // same place, so the system's are simply taken away (no fade): otherwise both show for a
+        // moment, one fading over the other.
+        if (android.os.Build.VERSION.SDK_INT >= 31) splashScreen.setOnExitAnimationListener { it.remove() }
         conn = PlayerConnection(applicationContext)
         handle(intent)
         // The opening plays when the app is started fresh from its icon (not when it comes back

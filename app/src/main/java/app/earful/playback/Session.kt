@@ -42,8 +42,8 @@ object Session {
         else Saved(items, o.optInt("index").coerceIn(0, items.size - 1), o.optLong("pos"))
     }.getOrNull()
 
-    /** The two tracks whose audio is worth keeping: the one you were on and the next. */
-    fun keepIds(): Set<String> = load()?.let { s -> s.items.drop(s.index).take(2).map { it.id }.toSet() }.orEmpty()
+    /** The tracks whose audio is worth keeping: everything still in the queue. */
+    fun keepIds(): Set<String> = load()?.items?.map { it.id }?.toSet().orEmpty()
 
     fun clear() { if (::file.isInitialized) file.delete() }
 }

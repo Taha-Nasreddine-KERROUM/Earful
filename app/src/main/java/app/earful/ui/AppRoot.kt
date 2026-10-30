@@ -85,9 +85,6 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
-/** Asked once per launch at most (see AppRoot). */
-private var askedBatteryThisLaunch = false
-
 class Toast(val text: String, val action: String? = null, val onAction: (() -> Unit)? = null, val id: Long = System.nanoTime())
 
 /** Things outside Compose (share sheet, notification tap) that the UI should react to. */
@@ -237,36 +234,6 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
                     toast = Toast("Tip: swipe the mini player down to close it")
                     prefs.edit().putBoolean("hint_close", true).apply()
                 }
-            }
-    }
-
-    // Some phones stop "background" apps after a while, music or not. Once something has played
-    // and the player is tucked away, ask (at most once per launch, three times in all) to be
-    // left alone. Android shows its own yes/no; nothing changes without it.
-    LaunchedEffect(Unit) {
-        snapshotFlow { conn.state.value?.playing == true && sheet.progress.value < 0.01f }
-            .distinctUntilChanged()
-            .collect { docked ->
-                if (!docked) return@collect
-                val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-                if (pm.isIgnoringBatteryOptimizations(ctx.packageName)) return@collect
-                val prefs = ctx.getSharedPreferences("ui", Context.MODE_PRIVATE)
-                val asked = prefs.getInt("asked_battery", 0)
-                if (asked >= 3 || askedBatteryThisLaunch) return@collect
-                delay(1500)
-                if (conn.state.value?.playing != true) return@collect
-                askedBatteryThisLaunch = true
-                prefs.edit().putInt("asked_battery", asked + 1).apply()
-                toast = Toast("Keep playing with the screen off?", "Allow", onAction = {
-                    runCatching {
-                        ctx.startActivity(
-                            android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-                                .setData(android.net.Uri.parse("package:" + ctx.packageName))
-                        )
-                    }.onFailure {
-                        runCatching { ctx.startActivity(android.content.Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
-                    }
-                })
             }
     }
 

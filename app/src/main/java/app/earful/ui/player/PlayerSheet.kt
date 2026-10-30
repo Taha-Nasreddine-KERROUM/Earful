@@ -1148,7 +1148,7 @@ private fun NowPlayingControls(
             LaunchedEffect(positionMs, rewind.shown != null, rewind.atStart) { if (rewind.shown != null && positionMs < 2_000) rewind.atStart = true }
             val shownMs = rewind.shown?.let { (it * np.durationMs).toLong() } ?: positionMs
             Box(Modifier.eatable(layer = HoleLayer.Player)) {
-                if (np.video.isLive) LiveBar(behindMs = (np.durationMs - positionMs).coerceAtLeast(0), onNow = { conn.goLive() })
+                if (np.video.isLive) LiveBar(behindMs = (np.durationMs - positionMs).coerceAtLeast(0), settled = np.playing && !np.waiting, onNow = { conn.goLive() })
                 else Scrubber(shownMs, np.durationMs, downloaded, onSeek = conn::seekTo, ads = ads[np.video.id].orEmpty(), follow = rewind.shown != null)
             }
             Spacer(Modifier.height(18.dp))
@@ -1194,8 +1194,13 @@ private fun NowPlayingControls(
  * says how far behind you are, and tapping it jumps back to now.
  */
 @Composable
-private fun LiveBar(behindMs: Long, onNow: () -> Unit) {
-    val behind = behindMs > 25_000
+private fun LiveBar(behindMs: Long, settled: Boolean, onNow: () -> Unit) {
+    // Only once it's really playing, and has stayed behind a moment: while a live starts, the
+    // player briefly reports itself at the far start of the broadcast before jumping to now,
+    // and that must not flash up as "behind".
+    val want = settled && behindMs > 25_000
+    var behind by remember { mutableStateOf(false) }
+    LaunchedEffect(want) { if (want) { delay(1200); behind = true } else behind = false }
     Box(Modifier.fillMaxWidth().height(44.dp), contentAlignment = Alignment.Center) {
         Row(
             Modifier.clip(RoundedCornerShape(50))

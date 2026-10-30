@@ -93,6 +93,9 @@ fun OpeningLogo(onDone: () -> Unit) {
             onDone()
             return@LaunchedEffect
         }
+        // A few frames' grace first: the app is still being built underneath, and a breath that
+        // starts on those frames stutters.
+        repeat(4) { androidx.compose.runtime.withFrameNanos { } }
         markIn.animateTo(1f, tween(220))
         // one breath: each bar swells a moment after the one before it, then sinks back
         coroutineScope {

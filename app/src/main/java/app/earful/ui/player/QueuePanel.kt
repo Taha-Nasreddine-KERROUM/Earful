@@ -244,6 +244,10 @@ fun QueuePanel(
     val dragY = remember { mutableFloatStateOf(0f) }
     val lift = remember { Animatable(0f) }
     val entries = working ?: queue.entries
+    // (the long-press handlers live as long as their row: they must always see today's queue,
+    // never the one from when the row first appeared)
+    val queueNow by rememberUpdatedState(queue)
+    val moveNow by rememberUpdatedState(onMove)
     // once the real queue has the new order (or after a moment, if it didn't take), show it again
     LaunchedEffect(queue, dragKey) {
         val w = working ?: return@LaunchedEffect
@@ -267,7 +271,7 @@ fun QueuePanel(
     }
     fun liftRow(e: QueueEntry) {
         if (dragKey != null) return
-        working = queue.entries
+        working = queueNow.entries
         dragKey = e.uid
         dragY.floatValue = 0f
         rows.reordering = true
@@ -277,9 +281,9 @@ fun QueuePanel(
     fun dropRow() {
         val key = dragKey ?: return
         val w = working
-        val e = queue.entries.firstOrNull { it.uid == key }
+        val e = queueNow.entries.firstOrNull { it.uid == key }
         val to = w?.indexOfFirst { it.uid == key } ?: -1
-        if (e != null && to >= 0 && to != e.index) onMove(e.index, to)
+        if (e != null && to >= 0 && to != e.index) moveNow(e.index, to)
         scope.launch {
             launch { lift.animateTo(0f, androidx.compose.animation.core.spring(dampingRatio = 0.8f, stiffness = 400f)) }
             androidx.compose.animation.core.animate(dragY.floatValue, 0f, animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.8f, stiffness = 400f)) { v, _ -> dragY.floatValue = v }
@@ -433,6 +437,9 @@ private fun QueueRow(
     val view = LocalView.current
     // (a long press that lifted the row isn't also a tap when the finger comes up)
     var justLifted by remember { mutableStateOf(false) }
+    val liftNow by rememberUpdatedState(onLift)
+    val dragNow by rememberUpdatedState(onDrag)
+    val dropNow by rememberUpdatedState(onDrop)
     val scope = rememberCoroutineScope()
     val unit = LocalDensity.current.density
     val remove by rememberUpdatedState(onRemove)
@@ -618,10 +625,10 @@ private fun QueueRow(
                 // Long-press anywhere on the row: it lifts and moves with your finger.
                 .pointerInput(entry.uid) {
                     detectDragGesturesAfterLongPress(
-                        onDragStart = { justLifted = true; onLift() },
-                        onDragEnd = { onDrop(); scope.launch { delay(120); justLifted = false } },
-                        onDragCancel = { onDrop(); scope.launch { delay(120); justLifted = false } },
-                    ) { change, amount -> change.consume(); onDrag(amount.y) }
+                        onDragStart = { justLifted = true; liftNow() },
+                        onDragEnd = { dropNow(); scope.launch { delay(120); justLifted = false } },
+                        onDragCancel = { dropNow(); scope.launch { delay(120); justLifted = false } },
+                    ) { change, amount -> change.consume(); dragNow(amount.y) }
                 }
                 .clickable {
                     if (justLifted) { justLifted = false; return@clickable }

@@ -170,15 +170,32 @@ object AudioCache {
     }
 
     /**
-     * Keeps exactly [ids] (current first, then next) and deletes everything else.
-     * Passed tracks lose their audio here but stay in the queue.
+     * Downloads [active] (the one playing, then the next, which waits for the first), pauses
+     * any other download that's still in the queue ([queued]: its bytes stay on the phone and it
+     * carries on from there when it's next again), and deletes the audio of anything that has
+     * left the queue.
      */
     @Synchronized
-    fun retain(ids: List<String>) {
-        val keep = ids.distinct().take(2)
-        files.keys.filter { it !in keep }.forEach { id -> files.remove(id)?.let { drop(it) } }
+    fun retain(active: List<String>, queued: Set<String>) {
+        val act = active.distinct().take(2)
+        files.keys.filter { it !in act }.forEach { id ->
+            val f = files.remove(id) ?: return@forEach
+            if (id in queued) pause(f) else drop(f)
+        }
+        // left the queue while paused (not loaded right now): its file goes too
+        dir.listFiles()?.forEach { file ->
+            val id = file.name.substringBeforeLast('.')
+            if (id !in queued && id !in act && files[id] == null) { file.delete(); _progress.update { it - id } }
+        }
         var previous: AudioFile? = null
-        keep.forEach { id -> previous = acquire(id, after = previous) }
+        act.forEach { id -> previous = acquire(id, after = previous) }
+    }
+
+    /** Stops one download but keeps every byte (and how far it got) for later. */
+    private fun pause(f: AudioFile) {
+        jobs.remove(f.videoId)?.cancel()
+        f.drop()
+        if (f.complete) writeMeta(f, done = true)
     }
 
     /** Drops one track's file and failure so the next request starts it fresh ("Try again"). */

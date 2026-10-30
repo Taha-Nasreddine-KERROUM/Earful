@@ -371,7 +371,8 @@ class PlaybackService : MediaSessionService() {
         val cur = p.currentMediaItem?.mediaId ?: return
         val next = if (p.hasNextMediaItem()) p.getMediaItemAt(p.nextMediaItemIndex).mediaId else null
         // (a live broadcast streams as it goes: there's nothing to download ahead)
-        AudioCache.retain(listOfNotNull(cur, next).filterNot { it.startsWith(Video.LIVE) })
+        val queued = (0 until p.mediaItemCount).map { p.getMediaItemAt(it).mediaId }.filterNot { it.startsWith(Video.LIVE) }.toSet()
+        AudioCache.retain(listOfNotNull(cur, next).filterNot { it.startsWith(Video.LIVE) }, queued)
         next?.takeUnless { it.startsWith(Video.LIVE) }?.let { loadAds(it) }
         scheduleAds()
     }
