@@ -264,7 +264,7 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     // a tap on the mini player, a video opened, a finger pulling it up.
     val playerUp by remember {
         derivedStateOf {
-            conn.state.value != null && (sheet.isExpanded || sheet.direct || sheet.progress.value > 0.15f || sheet.water.dragging)
+            conn.state.value != null && (sheet.isExpanded || sheet.rising || sheet.direct || sheet.progress.value > 0.15f || sheet.water.dragging)
         }
     }
 
@@ -278,15 +278,29 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     LaunchedEffect(imeUp) { if (!imeUp) imeDownAt = System.currentTimeMillis() }
     var resumeTyping by remember { mutableStateOf(false) }
     var refocus by remember { mutableIntStateOf(0) }
+    val rootView = LocalView.current
+    fun dropKeyboard() {
+        focusManager.clearFocus(force = true)
+        keyboard?.hide()
+        // and straight from Android too: some phones keep the keyboard otherwise
+        runCatching {
+            (rootView.context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                .hideSoftInputFromWindow(rootView.windowToken, 0)
+        }
+    }
     LaunchedEffect(playerUp) {
         if (playerUp) {
             if (searchOpen) {
                 // (a video tapped in the list puts the keyboard away a moment before the player rises)
-                resumeTyping = imeUpNow || System.currentTimeMillis() - imeDownAt < 700
-                focusManager.clearFocus(force = true)
-                keyboard?.hide()
+                resumeTyping = resumeTyping || imeUpNow || System.currentTimeMillis() - imeDownAt < 700
+                dropKeyboard()
+                // once more as the player settles, in case anything brought it back meanwhile
+                delay(350); dropKeyboard()
+                delay(500); dropKeyboard()
             }
         } else if (resumeTyping) {
+            // (only once the player has really gone back down)
+            delay(120)
             resumeTyping = false
             if (searchOpen) refocus++
         }

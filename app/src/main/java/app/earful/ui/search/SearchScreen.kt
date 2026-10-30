@@ -178,8 +178,14 @@ fun SearchScreen(
     LaunchedEffect(Unit) { model.watchSuggestions() }
 
     // Back from the player to search you were typing in (see AppRoot): carry on typing.
+    val allowedNow by rememberUpdatedState(typingAllowed)
     LaunchedEffect(refocus) {
-        if (refocus > 0) { focus.requestFocus(); keyboard?.show() }
+        if (refocus > 0 && allowedNow) { focus.requestFocus(); keyboard?.show() }
+    }
+    // The player is over search: nothing may hold the cursor or the keyboard here.
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    LaunchedEffect(typingAllowed) {
+        if (!typingAllowed) { focusManager.clearFocus(force = true); keyboard?.hide() }
     }
 
     val list = rememberLazyListState()
