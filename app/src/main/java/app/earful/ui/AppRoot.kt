@@ -264,7 +264,10 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     // a tap on the mini player, a video opened, a finger pulling it up.
     val playerUp by remember {
         derivedStateOf {
-            conn.state.value != null && (sheet.isExpanded || sheet.rising || sheet.direct || sheet.progress.value > 0.15f || sheet.water.dragging)
+            // (the player's state is read through np, which this watches: reading the
+            // connection's own value here would never be noticed changing, and the app starts
+            // with no player yet — so this stayed "not open" for good)
+            (sheet.isExpanded || sheet.rising || sheet.direct || sheet.progress.value > 0.15f || sheet.water.dragging) && np != null
         }
     }
 
