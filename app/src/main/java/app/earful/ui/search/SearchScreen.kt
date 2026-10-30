@@ -150,8 +150,8 @@ fun SearchScreen(
     onPlay: (Video) -> Unit,
     onQueue: (Video) -> Unit,
     onClose: () -> Unit,
-    /** The player is open over search (Now Playing, not the mini player). */
-    playerUp: Boolean = false,
+    /** Bumped to put the cursor back in the field (and the keyboard up). */
+    refocus: Int = 0,
     model: SearchModel = viewModel(),
 ) {
     val p = LocalPalette.current
@@ -174,29 +174,9 @@ fun SearchScreen(
     }
     LaunchedEffect(Unit) { model.watchSuggestions() }
 
-    // Opening a video while typing: the keyboard and the blinking cursor go away (they'd sit over
-    // Now Playing). Back to the mini player, you carry on typing where you left off.
-    var focused by remember { mutableStateOf(false) }
-    var typingAt by remember { mutableLongStateOf(0L) } // last moment the keyboard was up for this field
-    val imeUp = WindowInsets.isImeVisible
-    val imeNow by rememberUpdatedState(imeUp)
-    // (noted as the keyboard goes down, so a keyboard that's still up always counts as typing)
-    LaunchedEffect(focused, imeUp) { if (focused && !imeUp) typingAt = System.currentTimeMillis() }
-    var resume by remember { mutableStateOf(false) }
-    val focusManager = LocalFocusManager.current
-    LaunchedEffect(playerUp) {
-        if (playerUp) {
-            if (focused) {
-                // (a video tapped in the list hides the keyboard a moment before the player rises)
-                resume = (imeNow || System.currentTimeMillis() - typingAt < 900) && model.submitted == null
-                focusManager.clearFocus(force = true)
-                keyboard?.hide()
-            }
-        } else if (resume) {
-            resume = false
-            focus.requestFocus()
-            keyboard?.show()
-        }
+    // Back from the player to search you were typing in (see AppRoot): carry on typing.
+    LaunchedEffect(refocus) {
+        if (refocus > 0) { focus.requestFocus(); keyboard?.show() }
     }
 
     val list = rememberLazyListState()
@@ -261,7 +241,7 @@ fun SearchScreen(
                             cursorBrush = SolidColor(p.accent),
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                             keyboardActions = KeyboardActions(onSearch = { go(model.field.text) }),
-                            modifier = Modifier.fillMaxWidth().focusRequester(focus).onFocusChanged { focused = it.isFocused },
+                            modifier = Modifier.fillMaxWidth().focusRequester(focus),
                         )
                     }
                     if (model.field.text.isNotEmpty()) {

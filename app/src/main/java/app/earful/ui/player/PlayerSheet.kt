@@ -600,7 +600,9 @@ fun PlayerSheet(
     // Position: polled only while the app is visible (4×/s expanded, 1×/s mini). Zero in background.
     var pos by remember { mutableLongStateOf(0L) }
     val lifecycle = LocalLifecycleOwner.current
-    LaunchedEffect(np.video.id) {
+    // (asked again at once whenever playing starts or stops or the end is reached, so the bar
+    // never trails a second behind a replay or a seek)
+    LaunchedEffect(np.video.id, np.ended, np.playing) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
                 pos = conn.positionMs()
@@ -901,6 +903,7 @@ fun PlayerSheet(
             if (showMini) {
                 MiniContent(
                     np = shownNp, conn = conn,
+                    onReplay = { pos = 0L; conn.replay() },
                     textStart = with(density) { (miniArt.x + miniArt.w).toDp() } + 12.dp,
                     progress = if (np.durationMs > 0) pos.toFloat() / np.durationMs else 0f,
                     modifier = Modifier
@@ -1041,7 +1044,7 @@ fun PlayerSheet(
                     onJump = { conn.jumpTo(it) },
                     onRemove = { conn.remove(it) },
                     onMove = { from, to -> conn.move(from, to) },
-                    onPlayPause = { if (np.ended) conn.replay() else conn.togglePlay() },
+                    onPlayPause = { if (np.ended) { pos = 0L; conn.replay() } else conn.togglePlay() },
                     playing = np.playing,
                     soundPosition = { conn.positionMs() * 1000L },
                     onClose = { scope.launch { sheet.closeQueue(tapped = true) } },
@@ -1071,6 +1074,7 @@ private fun MiniContent(
     modifier: Modifier,
     onExpand: () -> Unit,
     swipeX: () -> Float,
+    onReplay: () -> Unit,
 ) {
     val p = LocalPalette.current
     Box(modifier.clickable(remember { MutableInteractionSource() }, null, onClickLabel = "Open player", onClick = onExpand)) {
@@ -1090,7 +1094,7 @@ private fun MiniContent(
             }
             // At the end (nothing after it), the button plays it again from the start.
             CircleButton(
-                onClick = { if (np.ended) conn.replay() else conn.togglePlay() }, size = 48.dp, highlight = p.fill,
+                onClick = { if (np.ended) onReplay() else conn.togglePlay() }, size = 48.dp, highlight = p.fill,
                 label = if (np.ended) "Play again" else if (np.playing) "Pause" else "Play",
             ) {
                 PlayPauseGlyph(showPause = np.playing || np.waiting, ended = np.ended, tint = p.label, size = 24.dp, replay = true)

@@ -82,7 +82,7 @@ fun VideoCard(video: Video, saved: Boolean, onOpen: () -> Unit, onToggleSave: ()
         }
         Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.Top) {
             // The logo opens the channel (or, while it's live, tunes in).
-            ChannelLogo(video, 36.dp, sizePx = 108)
+            ChannelLogo(video, 36.dp, sizePx = 108, together = rememberTogether(video))
             Column(Modifier.weight(1f).padding(start = 12.dp, end = 4.dp)) {
                 Text(video.title, Type.subheadStrong, maxLines = 2)
                 Spacer(Modifier.height(4.dp))

@@ -2,6 +2,8 @@ package app.earful.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.Page
 import org.schabi.newpipe.extractor.ServiceList
@@ -93,7 +95,11 @@ object YouTube {
         val video = Video(
             id = videoId,
             title = info.name.orEmpty().ifEmpty { fallback?.title.orEmpty() },
-            channel = collaborators(ex)?.also { collabs[videoId] = it }?.map { it.name }?.let(::names) ?: info.uploaderName.orEmpty().ifEmpty { fallback?.channel.orEmpty() },
+            channel = collaborators(ex)?.also { list ->
+                collabs[videoId] = list
+                // (pictures YouTube left out are fetched afterwards, without holding up playback)
+                if (list.any { it.avatar == null }) pictureScope.launch { collabs[videoId] = withPictures(list) }
+            }?.map { it.name }?.let(::names) ?: info.uploaderName.orEmpty().ifEmpty { fallback?.channel.orEmpty() },
             thumbnail = Video.bestImage(info.thumbnails, maxWidth = 1280)
                 ?: fallback?.thumbnail ?: Video.fallbackThumb(videoId),
             durationSec = info.duration,
@@ -153,6 +159,8 @@ object YouTube {
     /** One of the channels a video is by. */
     class Collab(val name: String, val url: String?, val avatar: String?)
 
+    private val pictureScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
+
     /** Videos made by several channels together, as far as the app has looked them up. */
     private val collabs = java.util.concurrent.ConcurrentHashMap<String, List<Collab>>()
 
@@ -164,8 +172,22 @@ object YouTube {
         val ex = service.getStreamExtractor("https://www.youtube.com/watch?v=$videoId")
         ex.fetchPage()
         val list = collaborators(ex) ?: listOf(Collab(ex.uploaderName.orEmpty(), ex.uploaderUrl, Video.bestImage(runCatching { ex.uploaderAvatars }.getOrNull(), 96)))
-        collabs[videoId] = list
-        list
+        val done = withPictures(list)
+        collabs[videoId] = done
+        done
+    }
+
+    /** Any channel whose picture YouTube didn't include gets it from its own page. */
+    private suspend fun withPictures(list: List<Collab>): List<Collab> = kotlinx.coroutines.coroutineScope {
+        list.map { c ->
+            if (c.avatar != null || c.url == null) kotlinx.coroutines.CompletableDeferred(c)
+            else async {
+                val pic = runCatching {
+                    Video.bestImage(org.schabi.newpipe.extractor.channel.ChannelInfo.getInfo(service, c.url).avatars, 176)
+                }.getOrNull()
+                Collab(c.name, c.url, pic)
+            }
+        }.map { it.await() }
     }
 
     /**
@@ -185,10 +207,22 @@ object YouTube {
             val name = item.getObject("title").getString("content")?.trim().orEmpty()
             if (name.isEmpty()) return@mapNotNull null
             val id = findString(item, "browseId")?.takeIf { it.startsWith("UC") }
-            val avatar = findArray(item, "sources")?.mapNotNull { (it as? com.grack.nanojson.JsonObject)?.getString("url") }?.lastOrNull()
+            // the channel's round picture (not the little verified badge, which also has "sources")
+            val avatarBox = findObject(item, "avatarViewModel") ?: item.getObject("leadingAccessory")
+            val avatar = (findArray(avatarBox, "sources") ?: findArray(item, "thumbnails"))
+                ?.mapNotNull { src -> (src as? com.grack.nanojson.JsonObject)?.let { o -> o.getString("url")?.let { u -> u to o.getInt("width", 0) } } }
+                ?.let { all -> all.filter { it.second in 1..176 }.maxByOrNull { it.second } ?: all.lastOrNull() }
+                ?.first?.let(::fullUrl)
             Collab(name, id?.let { "https://www.youtube.com/channel/$it" }, avatar)
         }.distinctBy { it.name }.takeIf { it.size > 1 }
     }.getOrNull()
+
+    /** Picture addresses sometimes come without "https:" in front. */
+    private fun fullUrl(u: String): String = when {
+        u.startsWith("//") -> "https:$u"
+        u.startsWith("http://") -> "https://" + u.removePrefix("http://")
+        else -> u
+    }
 
     private fun findString(node: Any?, key: String, depth: Int = 0): String? {
         if (depth > 40) return null

@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imeAnimationTarget
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -267,6 +268,30 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
         }
     }
 
+    // The player opening over search you're typing in: the keyboard and the blinking cursor go
+    // (they'd sit on top of Now Playing). Back to the mini player, you carry on typing.
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+    val imeUp = WindowInsets.isImeVisible
+    val imeUpNow by androidx.compose.runtime.rememberUpdatedState(imeUp)
+    var imeDownAt by remember { mutableStateOf(0L) }
+    LaunchedEffect(imeUp) { if (!imeUp) imeDownAt = System.currentTimeMillis() }
+    var resumeTyping by remember { mutableStateOf(false) }
+    var refocus by remember { mutableIntStateOf(0) }
+    LaunchedEffect(playerUp) {
+        if (playerUp) {
+            if (searchOpen) {
+                // (a video tapped in the list puts the keyboard away a moment before the player rises)
+                resumeTyping = imeUpNow || System.currentTimeMillis() - imeDownAt < 700
+                focusManager.clearFocus(force = true)
+                keyboard?.hide()
+            }
+        } else if (resumeTyping) {
+            resumeTyping = false
+            if (searchOpen) refocus++
+        }
+    }
+
     // Leaving search with the keyboard up, straight back to Home: the mini player rides the
     // keyboard down and lands on the tab bar the way it does when you minimise it, with a dip and
     // a ripple on the water where it touches.
@@ -361,7 +386,7 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
         if (np != null) Box(Modifier.fillMaxSize().graphicsLayer { alpha = if (Hole.isActive) 0f else 0.18f * playerOpen() }.background(Color.Black))
 
         if (search.shown) {
-            SearchScreen(contentBottom, search, onPlay = ::play, onQueue = ::enqueue, onClose = ::closeSearch, playerUp = playerUp)
+            SearchScreen(contentBottom, search, onPlay = ::play, onQueue = ::enqueue, onClose = ::closeSearch, refocus = refocus)
         }
         SearchMorph(search)
 

@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,6 +52,8 @@ fun ChannelLogo(
     avatar: String? = video.channelAvatar,
     sizePx: Int = (size.value * 3).toInt(),
     onOpen: (() -> Unit)? = null,
+    /** Made by several channels together: their pictures, overlapping (as YouTube shows them). */
+    together: List<app.earful.data.YouTube.Collab>? = null,
 ) {
     val actions = LocalChannelActions.current
     val version by LiveNow.version.collectAsStateWithLifecycle()
@@ -77,6 +80,15 @@ fun ChannelLogo(
                     color = Color.White, maxLines = 1,
                 )
             }
+        } else if (together != null && together.size > 1) {
+            // two pictures, one up-left and one down-right in front of it, parted by a thin ring
+            val d = size * 0.74f
+            val ring = (size.value * 0.06f).coerceAtLeast(1.5f).dp
+            val bg = app.earful.ui.theme.LocalPalette.current.bg
+            RemoteImage(together[0].avatar ?: avatar, Modifier.align(Alignment.TopStart).size(d).clip(CircleShape), sizePx = sizePx)
+            Box(Modifier.align(Alignment.BottomEnd).size(d + ring * 2).offset(x = ring, y = ring).clip(CircleShape).background(bg), contentAlignment = Alignment.Center) {
+                RemoteImage(together[1].avatar, Modifier.size(d).clip(CircleShape), sizePx = sizePx)
+            }
         } else {
             RemoteImage(avatar, Modifier.size(size).clip(CircleShape), sizePx = sizePx)
         }
@@ -85,3 +97,20 @@ fun ChannelLogo(
 
 @Composable
 private fun <T> remember(a: Any?, b: Any?, calc: () -> T): T = androidx.compose.runtime.remember(a, b, calc)
+
+/**
+ * The channels [video] was made by, when it's several (null otherwise). Looked up only when its
+ * channel line names more than one, or already known from playing it; remembered after.
+ */
+@Composable
+fun rememberTogether(video: Video): List<app.earful.data.YouTube.Collab>? {
+    if (video.isLive) return null
+    val id = video.youtubeId
+    var list by androidx.compose.runtime.remember(id) { androidx.compose.runtime.mutableStateOf(app.earful.data.YouTube.knownCollaborators(id)) }
+    androidx.compose.runtime.LaunchedEffect(id) {
+        if (list == null && app.earful.data.YouTube.looksShared(video.channel)) {
+            list = runCatching { app.earful.data.YouTube.collaborators(id) }.getOrNull()
+        }
+    }
+    return list?.takeIf { it.size > 1 }
+}
