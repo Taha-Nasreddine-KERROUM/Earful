@@ -207,7 +207,7 @@ class PlaybackService : MediaSessionService() {
         }
     }
 
-    // ---- passed videos leave the queue a minute later -------------------------------------------
+    // ---- passed videos keep their place in the queue, but their audio goes a minute later ------
 
     /** When each passed video (by id) was left behind. */
     private val passedAt = HashMap<String, Long>()
@@ -228,26 +228,24 @@ class PlaybackService : MediaSessionService() {
         schedulePrune()
     }
 
-    private fun schedulePrune() {
-        pruneJob?.cancel()
-        val first = passedAt.values.minOrNull() ?: return
-        val wait = (first + PASSED_STAYS_MS - android.os.SystemClock.elapsedRealtime()).coerceAtLeast(0) + 50
-        pruneJob = scope.launch {
-            delay(wait)
-            safely { prune() }
-        }
+    /** Passed for a minute or more (and not also waiting further on): its audio can go. */
+    private fun expired(): Set<String> {
+        val p = exoRef ?: return emptySet()
+        val now = android.os.SystemClock.elapsedRealtime()
+        val ahead = (minOf(p.currentMediaItemIndex, p.mediaItemCount).coerceAtLeast(0) until p.mediaItemCount)
+            .map { p.getMediaItemAt(it).mediaId }.toSet()
+        return passedAt.filter { (id, at) -> now - at >= PASSED_STAYS_MS && id !in ahead }.keys
     }
 
-    private fun prune() {
-        val p = exoRef ?: return
+    private fun schedulePrune() {
+        pruneJob?.cancel()
         val now = android.os.SystemClock.elapsedRealtime()
-        // From the end backwards, so the indexes in front stay valid.
-        for (i in minOf(p.currentMediaItemIndex, p.mediaItemCount) - 1 downTo 0) {
-            val id = p.getMediaItemAt(i).mediaId
-            val at = passedAt[id] ?: continue
-            if (now - at >= PASSED_STAYS_MS) { p.removeMediaItem(i); passedAt.remove(id) }
+        val first = passedAt.values.filter { now - it < PASSED_STAYS_MS }.minOrNull() ?: return
+        val wait = (first + PASSED_STAYS_MS - now).coerceAtLeast(0) + 50
+        pruneJob = scope.launch {
+            delay(wait)
+            safely { updateWindow(); schedulePrune() }
         }
-        schedulePrune()
     }
 
     private fun itemFor(v: Video): MediaItem = MediaItem.Builder()
@@ -351,7 +349,11 @@ class PlaybackService : MediaSessionService() {
     }
 
     private suspend fun liveItem(item: MediaItem): MediaItem {
-        val (video, hls) = YouTube.live(item.mediaId.removePrefix(Video.LIVE))
+        val (fresh, hls) = YouTube.live(item.mediaId.removePrefix(Video.LIVE))
+        // keep the picture it was opened with (a new one would blink while it loads)
+        val known = item.mediaMetadata.extras?.let { videoFromExtras(item.mediaId, it) }
+        val video = if (known != null && known.thumbnail.isNotBlank())
+            fresh.copy(thumbnail = known.thumbnail, title = fresh.title.ifBlank { known.title }) else fresh
         return MediaItem.Builder()
             .setMediaId(item.mediaId)
             .setUri(hls)
@@ -371,7 +373,10 @@ class PlaybackService : MediaSessionService() {
         val cur = p.currentMediaItem?.mediaId ?: return
         val next = if (p.hasNextMediaItem()) p.getMediaItemAt(p.nextMediaItemIndex).mediaId else null
         // (a live broadcast streams as it goes: there's nothing to download ahead)
-        val queued = (0 until p.mediaItemCount).map { p.getMediaItemAt(it).mediaId }.filterNot { it.startsWith(Video.LIVE) }.toSet()
+        // everything in the queue keeps its audio, except videos played more than a minute ago
+        val gone = expired()
+        val queued = (0 until p.mediaItemCount).map { p.getMediaItemAt(it).mediaId }
+            .filterNot { it.startsWith(Video.LIVE) || it in gone }.toSet()
         AudioCache.retain(listOfNotNull(cur, next).filterNot { it.startsWith(Video.LIVE) }, queued)
         next?.takeUnless { it.startsWith(Video.LIVE) }?.let { loadAds(it) }
         scheduleAds()
@@ -481,7 +486,7 @@ class PlaybackService : MediaSessionService() {
     }
 
     companion object {
-        /** How long a video you've moved past stays in Up next before it goes. */
+        /** How long a video you've moved past keeps its downloaded audio. */
         const val PASSED_STAYS_MS = 60_000L
 
         fun metadataFor(v: Video): MediaMetadata = MediaMetadata.Builder()

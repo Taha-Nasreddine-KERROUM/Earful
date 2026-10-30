@@ -46,8 +46,16 @@ import kotlinx.coroutines.launch
 @Composable
 fun RemoteImage(url: String?, modifier: Modifier, contentScale: ContentScale = ContentScale.Crop, sizePx: Int? = null) {
     val ctx = LocalContext.current
+    // When the picture changes (another video, a sharper copy of the same one), the old one stays
+    // up until the new one has arrived, instead of a blank moment in between.
+    val last = remember { arrayOfNulls<String>(1) }
+    val key = url?.let { "$it@${sizePx ?: 0}" }
     val request = remember(url, sizePx) {
-        ImageRequest.Builder(ctx).data(url).crossfade(180).apply { if (sizePx != null) size(sizePx) }.build()
+        ImageRequest.Builder(ctx).data(url).crossfade(180)
+            .memoryCacheKey(key)
+            .placeholderMemoryCacheKey(last[0]?.takeIf { it != key })
+            .listener(onSuccess = { _, _ -> last[0] = key })
+            .apply { if (sizePx != null) size(sizePx) }.build()
     }
     AsyncImage(
         model = request,

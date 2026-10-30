@@ -45,6 +45,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
 import app.earful.ui.hole.Hole
 import app.earful.ui.hole.HoleLayer
 import app.earful.ui.hole.HoleLens
@@ -199,8 +203,11 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     // A channel's page, over Home or search.
     var channel by remember { mutableStateOf<app.earful.ui.channel.ChannelRef?>(null) }
     val channelMotion = remember { app.earful.ui.channel.ChannelMotion() }
-    fun openChannel(v: Video) {
+    // A video made by several channels together: which one to open?
+    var chooser by remember { mutableStateOf<Pair<Video, List<app.earful.data.YouTube.Collab>>?>(null) }
+    fun openChannelNow(v: Video) {
         keyboard?.hide()
+        chooser = null
         val ref = app.earful.ui.channel.ChannelRef(v.channelUrl, v.channel, v.channelAvatar, v)
         scope.launch {
             if (sheet.isExpanded) sheet.collapse()
@@ -208,6 +215,19 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
             channel = ref
             channelMotion.shown.snapTo(0f)
             channelMotion.open()
+        }
+    }
+    fun openChannel(v: Video) {
+        val id = v.youtubeId
+        val known = app.earful.data.YouTube.knownCollaborators(id)
+        when {
+            known != null && known.size > 1 -> chooser = v to known
+            known == null && app.earful.data.YouTube.looksShared(v.channel) -> scope.launch {
+                // (only looked up when the name says it might be several)
+                val list = runCatching { app.earful.data.YouTube.collaborators(id) }.getOrNull()
+                if (list != null && list.size > 1) chooser = v to list else openChannelNow(v)
+            }
+            else -> openChannelNow(v)
         }
     }
     fun closeChannel() {
@@ -355,6 +375,12 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
             )
         }
 
+        chooser?.let { (v, list) ->
+            ChannelChooser(list, onPick = { c ->
+                openChannelNow(v.copy(channel = c.name, channelUrl = c.url ?: v.channelUrl, channelAvatar = c.avatar ?: v.channelAvatar))
+            }, onDismiss = { chooser = null })
+        }
+
         toast?.let { t ->
             ToastPill(t, Modifier.align(Alignment.BottomCenter).padding(bottom = contentBottom + 12.dp)) { toast = null }
         }
@@ -397,6 +423,7 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     BackHandler(enabled = searchOpen && !sheet.isExpanded) { closeSearch() }
     BackHandler(enabled = !searchOpen && tab != Tab.Home && !sheet.isExpanded) { goTo(Tab.Home) }
     BackHandler(enabled = channel != null && !sheet.isExpanded) { closeChannel() }
+    BackHandler(enabled = chooser != null) { chooser = null }
     // Predictive back drags the player down with your thumb, exactly like pulling it.
     PredictiveBackHandler(enabled = np != null && sheet.isExpanded) { events ->
         sheet.water.dragStart()
@@ -459,6 +486,44 @@ private fun ToastPill(t: Toast, modifier: Modifier, onDone: () -> Unit) {
                 Spacer(Modifier.width(6.dp))
                 Box(Modifier.pressable { t.onAction?.invoke(); visible = false }.padding(horizontal = 12.dp, vertical = 2.dp)) {
                     Text(t.action, Type.subheadStrong, color = Color(0xFFFF6482))
+                }
+            }
+        }
+    }
+}
+
+/** "Made by": the channels a video was made by together; tap one to open it. */
+@Composable
+private fun ChannelChooser(list: List<app.earful.data.YouTube.Collab>, onPick: (app.earful.data.YouTube.Collab) -> Unit, onDismiss: () -> Unit) {
+    val p = LocalPalette.current
+    val shown = remember { androidx.compose.animation.core.Animatable(0f) }
+    LaunchedEffect(Unit) { shown.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.85f, stiffness = 500f)) }
+    Box(
+        Modifier.fillMaxSize()
+            .graphicsLayer { alpha = shown.value.coerceIn(0f, 1f) }
+            .background(Color.Black.copy(alpha = 0.35f))
+            .pressable(scaleTo = 1f, onClick = onDismiss),
+        contentAlignment = Alignment.Center,
+    ) {
+        androidx.compose.foundation.layout.Column(
+            Modifier.padding(horizontal = 40.dp)
+                .graphicsLayer { val s = 0.92f + 0.08f * shown.value; scaleX = s; scaleY = s }
+                .shadow(24.dp, RoundedCornerShape(20.dp))
+                .clip(RoundedCornerShape(20.dp))
+                .background(p.bgElevated)
+                .pointerInput(Unit) { detectTapGestures { } } // a tap on the card itself doesn't close it
+                .padding(vertical = 10.dp),
+        ) {
+            Text("Made together by", Type.footnote, color = p.secondary, modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 6.dp))
+            list.forEach { c ->
+                Row(
+                    Modifier.fillMaxWidth().pressable(scaleTo = 0.97f, label = "Open ${c.name}") { onPick(c) }
+                        .padding(horizontal = 20.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    app.earful.ui.components.RemoteImage(c.avatar, Modifier.size(40.dp).clip(androidx.compose.foundation.shape.CircleShape), sizePx = 120)
+                    Spacer(Modifier.width(14.dp))
+                    Text(c.name, Type.headline, maxLines = 1)
                 }
             }
         }

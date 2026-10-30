@@ -1003,10 +1003,7 @@ fun PlayerSheet(
                             shape = Window(art.w * breathe / s, art.h * breathe / s, lerp(6.dp.toPx(), 12.dp.toPx(), pa) / s.coerceAtLeast(0.05f))
                             clip = true
                             ambientShadowColor = Color.Black; spotShadowColor = Color.Black
-                            if (Build.VERSION.SDK_INT >= 31 && e > 0f && e < 1f) {
-                                val b = (1f - e) * 2.dp.toPx()
-                                renderEffect = if (b > 0.3f) BlurEffect(b, b, TileMode.Decal) else null
-                            } else renderEffect = null
+                            renderEffect = null
                         }
                         .background(Color(0xFF2C2C2E))
                 ) {
@@ -1342,11 +1339,12 @@ internal class Rewind {
         running = true
         try {
             spin.snapTo(0f)
-            launch { spin.animateTo(-1080f, tween(900, easing = Motion.outCubic)) }
+            launch { spin.animateTo(-720f, tween(520, easing = Motion.outCubic)) }
             roll.snapTo(0f)
-            roll.animateTo(1f, tween(900, easing = androidx.compose.animation.core.LinearEasing)) {
+            // fast from the first frame, slowing into 0:00 (no slow start: that read as lag)
+            roll.animateTo(1f, tween(480, easing = androidx.compose.animation.core.LinearEasing)) {
                 val e = value
-                shown = 1f - (if (e < 0.5f) 4f * e * e * e else 1f - (-2f * e + 2f).let { it * it * it } / 2f)
+                shown = (1f - e).let { it * it * it }
             }
             // it stops dead at the start: no bounce past 0:00 (that read as the bar jumping forward)
             shown = 0f

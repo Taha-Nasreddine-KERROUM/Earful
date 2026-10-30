@@ -93,7 +93,7 @@ object YouTube {
         val video = Video(
             id = videoId,
             title = info.name.orEmpty().ifEmpty { fallback?.title.orEmpty() },
-            channel = collaborators(ex)?.let(::names) ?: info.uploaderName.orEmpty().ifEmpty { fallback?.channel.orEmpty() },
+            channel = collaborators(ex)?.also { collabs[videoId] = it }?.map { it.name }?.let(::names) ?: info.uploaderName.orEmpty().ifEmpty { fallback?.channel.orEmpty() },
             thumbnail = Video.bestImage(info.thumbnails, maxWidth = 1280)
                 ?: fallback?.thumbnail ?: Video.fallbackThumb(videoId),
             durationSec = info.duration,
@@ -150,21 +150,69 @@ object YouTube {
         return items.mapNotNull(Video::from).distinctBy { it.id }
     }
 
+    /** One of the channels a video is by. */
+    class Collab(val name: String, val url: String?, val avatar: String?)
+
+    /** Videos made by several channels together, as far as the app has looked them up. */
+    private val collabs = java.util.concurrent.ConcurrentHashMap<String, List<Collab>>()
+
+    /** The channels [videoId] is by, if it's already known (from playing it). */
+    fun knownCollaborators(videoId: String): List<Collab>? = collabs[videoId]
+
+    /** The channels [videoId] is by (one, or several when they made it together). */
+    suspend fun collaborators(videoId: String): List<Collab> = collabs[videoId] ?: io {
+        val ex = service.getStreamExtractor("https://www.youtube.com/watch?v=$videoId")
+        ex.fetchPage()
+        val list = collaborators(ex) ?: listOf(Collab(ex.uploaderName.orEmpty(), ex.uploaderUrl, Video.bestImage(runCatching { ex.uploaderAvatars }.getOrNull(), 96)))
+        collabs[videoId] = list
+        list
+    }
+
     /**
-     * A video made by several channels together: all their names (YouTube lists them in a little
+     * A video made by several channels together: all of them (YouTube lists them in a little
      * dialog behind the owner's name; the reader only gives the first). Null for a normal video,
      * or if YouTube's answer doesn't have the expected shape.
      */
-    private fun collaborators(ex: org.schabi.newpipe.extractor.stream.StreamExtractor): List<String>? = runCatching {
+    private fun collaborators(ex: org.schabi.newpipe.extractor.stream.StreamExtractor): List<Collab>? = runCatching {
         val f = ex.javaClass.getDeclaredField("nextResponse").apply { isAccessible = true }
         val next = f.get(ex) as? com.grack.nanojson.JsonObject ?: return@runCatching null
         val owner = findObject(next, "videoOwnerRenderer") ?: return@runCatching null
         val items = owner.getObject("navigationEndpoint").getObject("showDialogCommand")
             .getObject("panelLoadingStrategy").getObject("inlineContent").getObject("dialogViewModel")
             .getObject("customContent").getObject("listViewModel").getArray("listItems")
-        items.mapNotNull { (it as? com.grack.nanojson.JsonObject)?.getObject("listItemViewModel")?.getObject("title")?.getString("content") }
-            .map { it.trim() }.filter { it.isNotEmpty() }.distinct().takeIf { it.size > 1 }
+        items.mapNotNull { it ->
+            val item = (it as? com.grack.nanojson.JsonObject)?.getObject("listItemViewModel") ?: return@mapNotNull null
+            val name = item.getObject("title").getString("content")?.trim().orEmpty()
+            if (name.isEmpty()) return@mapNotNull null
+            val id = findString(item, "browseId")?.takeIf { it.startsWith("UC") }
+            val avatar = findArray(item, "sources")?.mapNotNull { (it as? com.grack.nanojson.JsonObject)?.getString("url") }?.lastOrNull()
+            Collab(name, id?.let { "https://www.youtube.com/channel/$it" }, avatar)
+        }.distinctBy { it.name }.takeIf { it.size > 1 }
     }.getOrNull()
+
+    private fun findString(node: Any?, key: String, depth: Int = 0): String? {
+        if (depth > 40) return null
+        when (node) {
+            is com.grack.nanojson.JsonObject -> {
+                (node[key] as? String)?.let { return it }
+                for (v in node.values) findString(v, key, depth + 1)?.let { return it }
+            }
+            is com.grack.nanojson.JsonArray -> for (v in node) findString(v, key, depth + 1)?.let { return it }
+        }
+        return null
+    }
+
+    private fun findArray(node: Any?, key: String, depth: Int = 0): com.grack.nanojson.JsonArray? {
+        if (depth > 40) return null
+        when (node) {
+            is com.grack.nanojson.JsonObject -> {
+                (node[key] as? com.grack.nanojson.JsonArray)?.let { return it }
+                for (v in node.values) findArray(v, key, depth + 1)?.let { return it }
+            }
+            is com.grack.nanojson.JsonArray -> for (v in node) findArray(v, key, depth + 1)?.let { return it }
+        }
+        return null
+    }
 
     private fun findObject(node: Any?, key: String, depth: Int = 0): com.grack.nanojson.JsonObject? {
         if (depth > 40) return null
@@ -179,6 +227,10 @@ object YouTube {
     }
 
     /** "A and B", "A, B and C" — the way YouTube writes several channels. */
+    /** Does this channel line name several channels ("A and B", "A & B", "A، B"…)? */
+    fun looksShared(channel: String): Boolean =
+        Regex("""\s(and|&|et|y|und|e|و|и|ve|と|和)\s|،|, """, RegexOption.IGNORE_CASE).containsMatchIn(channel)
+
     internal fun names(list: List<String>): String =
         if (list.size <= 1) list.firstOrNull().orEmpty() else list.dropLast(1).joinToString(", ") + " and " + list.last()
 
