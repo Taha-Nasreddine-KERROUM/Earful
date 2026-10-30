@@ -80,7 +80,9 @@ object YouTube {
     // ---- playback -------------------------------------------------------------------------
 
     suspend fun resolve(videoId: String, fallback: Video?): ResolvedAudio = io {
-        val info = StreamInfo.getInfo(service, "https://www.youtube.com/watch?v=$videoId")
+        val ex = service.getStreamExtractor("https://www.youtube.com/watch?v=$videoId")
+        ex.fetchPage()
+        val info = StreamInfo.getInfo(ex)
         val audio = pickAudio(info.audioStreams)
             ?: error("This video has no audio we can play")
         // its real shape, for the full player's picture (already part of this answer: no extra data)
@@ -91,7 +93,7 @@ object YouTube {
         val video = Video(
             id = videoId,
             title = info.name.orEmpty().ifEmpty { fallback?.title.orEmpty() },
-            channel = info.uploaderName.orEmpty().ifEmpty { fallback?.channel.orEmpty() },
+            channel = collaborators(ex)?.let(::names) ?: info.uploaderName.orEmpty().ifEmpty { fallback?.channel.orEmpty() },
             thumbnail = Video.bestImage(info.thumbnails, maxWidth = 1280)
                 ?: fallback?.thumbnail ?: Video.fallbackThumb(videoId),
             durationSec = info.duration,
@@ -147,6 +149,38 @@ object YouTube {
         items.forEach { it -> Video.liveFrom(it)?.let(LiveNow::seen) }
         return items.mapNotNull(Video::from).distinctBy { it.id }
     }
+
+    /**
+     * A video made by several channels together: all their names (YouTube lists them in a little
+     * dialog behind the owner's name; the reader only gives the first). Null for a normal video,
+     * or if YouTube's answer doesn't have the expected shape.
+     */
+    private fun collaborators(ex: org.schabi.newpipe.extractor.stream.StreamExtractor): List<String>? = runCatching {
+        val f = ex.javaClass.getDeclaredField("nextResponse").apply { isAccessible = true }
+        val next = f.get(ex) as? com.grack.nanojson.JsonObject ?: return@runCatching null
+        val owner = findObject(next, "videoOwnerRenderer") ?: return@runCatching null
+        val items = owner.getObject("navigationEndpoint").getObject("showDialogCommand")
+            .getObject("panelLoadingStrategy").getObject("inlineContent").getObject("dialogViewModel")
+            .getObject("customContent").getObject("listViewModel").getArray("listItems")
+        items.mapNotNull { (it as? com.grack.nanojson.JsonObject)?.getObject("listItemViewModel")?.getObject("title")?.getString("content") }
+            .map { it.trim() }.filter { it.isNotEmpty() }.distinct().takeIf { it.size > 1 }
+    }.getOrNull()
+
+    private fun findObject(node: Any?, key: String, depth: Int = 0): com.grack.nanojson.JsonObject? {
+        if (depth > 40) return null
+        when (node) {
+            is com.grack.nanojson.JsonObject -> {
+                (node[key] as? com.grack.nanojson.JsonObject)?.let { return it }
+                for (v in node.values) findObject(v, key, depth + 1)?.let { return it }
+            }
+            is com.grack.nanojson.JsonArray -> for (v in node) findObject(v, key, depth + 1)?.let { return it }
+        }
+        return null
+    }
+
+    /** "A and B", "A, B and C" — the way YouTube writes several channels. */
+    internal fun names(list: List<String>): String =
+        if (list.size <= 1) list.firstOrNull().orEmpty() else list.dropLast(1).joinToString(", ") + " and " + list.last()
 
     /** What a live broadcast streams right now (HLS), with its details. */
     suspend fun live(videoId: String): Pair<Video, String> = io {

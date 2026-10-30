@@ -514,6 +514,8 @@ class SheetWater {
 }
 
 private val MiniHeight = 64.dp
+/** Live: how close to "now" a skip may land (the newest few seconds aren't there to play yet). */
+internal const val LIVE_MARGIN_MS = 3_000L
 private val MiniMargin = 8.dp
 private val MiniArtH = 48.dp
 
@@ -1013,6 +1015,7 @@ fun PlayerSheet(
                         enabled = fullyOpen,
                         playing = np.playing,
                         onSeek = { s -> conn.seekBy(s * 1000L) },
+                        canSeek = { s -> !np.video.isLive || conn.liveRoom(s * 1000L) },
                         onToggle = { conn.togglePlay() },
                         modifier = Modifier.fillMaxSize(),
                         showHint = hintPending && fullyOpen,
@@ -1152,7 +1155,11 @@ private fun NowPlayingControls(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                SkipButton(forward = false) { conn.seekBy(-10_000) }
+                // Live: a skip is offered only if there really is that much to skip (behind you,
+                // or between you and now).
+                val live = np.video.isLive
+                val ahead = (np.durationMs - positionMs - LIVE_MARGIN_MS).coerceAtLeast(0)
+                SkipButton(forward = false, enabled = !live || positionMs >= 10_000) { conn.seekBy(-10_000) }
                 val ending = np.ended || rewind.running
                 CircleButton(
                     modifier = Modifier.eatable(layer = HoleLayer.Player),
@@ -1165,7 +1172,7 @@ private fun NowPlayingControls(
                         tint = Color.White, size = 56.dp, replay = true, spin = { rewind.spin.value },
                     )
                 }
-                SkipButton(forward = true) { conn.seekBy(10_000) }
+                SkipButton(forward = true, enabled = !live || ahead >= 10_000) { conn.seekBy(10_000) }
             }
             Spacer(Modifier.height(20.dp))
             Box(Modifier.eatable(layer = HoleLayer.Player)) { StatusLine(np, downloaded, justSaved, error, onRetry = { conn.retry(np.video) }) }
@@ -1310,8 +1317,7 @@ fun PlayPauseGlyph(
 
 /**
  * Playing the last video again, like rewinding a tape: the arrow spins backwards and slows down,
- * the picture shivers back, the time rolls down to 0:00, the bar snaps to the start with a small
- * bounce, then it plays.
+ * the picture shivers back, the time rolls down to 0:00 and stops there, then it plays.
  */
 @Stable
 internal class Rewind {
@@ -1335,11 +1341,9 @@ internal class Rewind {
                 val e = value
                 shown = 1f - (if (e < 0.5f) 4f * e * e * e else 1f - (-2f * e + 2f).let { it * it * it } / 2f)
             }
+            // it stops dead at the start: no bounce past 0:00 (that read as the bar jumping forward)
+            shown = 0f
             conn.replay()
-            val bounce = Animatable(-0.03f)
-            bounce.animateTo(0f, androidx.compose.animation.core.spring(dampingRatio = 0.4f, stiffness = 500f)) {
-                shown = value.coerceAtLeast(0f) // it overshoots the start a little and springs back
-            }
             // Hand the bar back only once the time the screen shows (polled, so it can lag behind the
             // player) is really at the start: otherwise the bar flashes back to the end for a moment.
             shown = 0f

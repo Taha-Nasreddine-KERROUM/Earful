@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
@@ -69,7 +70,7 @@ import kotlin.random.Random
  * when you stop (see [Hole]).
  */
 @Composable
-internal fun SkipButton(forward: Boolean, onSkip: () -> Unit) {
+internal fun SkipButton(forward: Boolean, enabled: Boolean = true, onSkip: () -> Unit) {
     val scope = rememberCoroutineScope()
     val spin = remember { SkipSpin(if (forward) 1f else -1f) }
     val measurer = rememberTextMeasurer(cacheSize = 4)
@@ -85,8 +86,11 @@ internal fun SkipButton(forward: Boolean, onSkip: () -> Unit) {
             .eatable(layer = app.earful.ui.hole.HoleLayer.Player, owner = spin),
         contentAlignment = Alignment.Center,
     ) {
+        val dim by androidx.compose.animation.core.animateFloatAsState(if (enabled) 1f else 0.3f, label = "skipDim")
         CircleButton(
             onClick = ::tap,
+            enabled = enabled,
+            modifier = Modifier.graphicsLayer { alpha = dim },
             size = 72.dp,
             label = if (forward) "Forward 10 seconds" else "Back 10 seconds",
         ) {

@@ -177,7 +177,17 @@ class PlayerConnection(private val context: Context) {
         c.play()
     }
 
+    /** Live: is there [deltaMs] to skip (back into what's kept, or forward towards now)? */
+    fun liveRoom(deltaMs: Long): Boolean {
+        val c = controller ?: return false
+        val dur = c.duration.takeIf { it > 0 } ?: return false
+        return if (deltaMs > 0) dur - c.currentPosition - app.earful.ui.player.LIVE_MARGIN_MS >= deltaMs
+        else c.currentPosition >= -deltaMs
+    }
+
     fun seekBy(deltaMs: Long) = withController { c ->
+        val live = c.isCurrentMediaItemLive
+        if (live && !liveRoom(deltaMs)) return@withController
         val dur = c.duration.takeIf { it > 0 } ?: Long.MAX_VALUE
         c.seekTo((c.currentPosition + deltaMs).coerceIn(0, dur))
         if (deltaMs < 0 && c.playbackState == Player.STATE_ENDED) c.play()

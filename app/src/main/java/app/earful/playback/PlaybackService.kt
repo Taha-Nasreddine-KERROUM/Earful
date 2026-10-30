@@ -446,9 +446,12 @@ class PlaybackService : MediaSessionService() {
             if (item.mediaId != v.id) continue
             val known = item.mediaMetadata.extras?.let { videoFromExtras(v.id, it) }
             val incomplete = known == null || known.title.isBlank() || known.title == "Loading…" || known.durationSec <= 0
-            if (!incomplete) continue
-            val merged = if (known == null || known.title.isBlank() || known.title == "Loading…") v
-                else known.copy(durationSec = v.durationSec)
+            // made by several channels, and the list only named one of them: name them all
+            val moreNames = known != null && v.channel != known.channel && " and " in v.channel && !(" and " in known.channel)
+            if (!incomplete && !moreNames) continue
+            var merged = if (known == null || known.title.isBlank() || known.title == "Loading…") v
+                else known.copy(durationSec = if (known.durationSec > 0) known.durationSec else v.durationSec)
+            if (moreNames) merged = merged.copy(channel = v.channel)
             p.replaceMediaItem(i, item.buildUpon().setMediaMetadata(metadataFor(merged)).build())
         }
         recordListen()

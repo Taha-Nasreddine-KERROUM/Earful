@@ -37,6 +37,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -178,14 +179,16 @@ fun SearchScreen(
     var focused by remember { mutableStateOf(false) }
     var typingAt by remember { mutableLongStateOf(0L) } // last moment the keyboard was up for this field
     val imeUp = WindowInsets.isImeVisible
-    LaunchedEffect(focused, imeUp) { if (focused && imeUp) typingAt = System.currentTimeMillis() }
+    val imeNow by rememberUpdatedState(imeUp)
+    // (noted as the keyboard goes down, so a keyboard that's still up always counts as typing)
+    LaunchedEffect(focused, imeUp) { if (focused && !imeUp) typingAt = System.currentTimeMillis() }
     var resume by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     LaunchedEffect(playerUp) {
         if (playerUp) {
             if (focused) {
                 // (a video tapped in the list hides the keyboard a moment before the player rises)
-                resume = System.currentTimeMillis() - typingAt < 900 && model.submitted == null
+                resume = (imeNow || System.currentTimeMillis() - typingAt < 900) && model.submitted == null
                 focusManager.clearFocus(force = true)
                 keyboard?.hide()
             }

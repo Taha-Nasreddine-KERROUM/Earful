@@ -272,7 +272,13 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
 
     StatusBarFollowsSheet(sheet)
 
-    val playerUp by remember { derivedStateOf { conn.state.value != null && (sheet.progress.value > 0.3f || sheet.direct) } }
+    // The player is (on its way to being) open over search: from the moment it starts to rise —
+    // a tap on the mini player, a video opened, a finger pulling it up.
+    val playerUp by remember {
+        derivedStateOf {
+            conn.state.value != null && (sheet.isExpanded || sheet.direct || sheet.progress.value > 0.15f || sheet.water.dragging)
+        }
+    }
 
     // Leaving search with the keyboard up, straight back to Home: the mini player rides the
     // keyboard down and lands on the tab bar the way it does when you minimise it, with a dip and

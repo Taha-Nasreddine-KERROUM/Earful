@@ -82,6 +82,8 @@ fun ArtworkGestures(
     onSeek: (seconds: Int) -> Unit,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Whether a skip of that many seconds is possible right now (live: only what's really there). */
+    canSeek: (seconds: Int) -> Boolean = { true },
     showHint: Boolean = false,
     onHintShown: () -> Unit = {},
 ) {
@@ -93,6 +95,7 @@ fun ArtworkGestures(
     var streakTime by remember { mutableStateOf(0L) }
 
     fun fire(zone: Zone, at: Offset, now: Long) {
+        if (zone != Zone.Center && !canSeek(zone.seconds)) { streakZone = null; return } // nothing there to skip to
         Haptics.tick(view)
         if (zone == Zone.Center) {
             onToggle(); toggleId++; streakZone = null; return
