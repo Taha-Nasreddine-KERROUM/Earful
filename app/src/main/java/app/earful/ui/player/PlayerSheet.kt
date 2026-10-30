@@ -1345,10 +1345,10 @@ internal class Rewind {
             spin.snapTo(0f)
             launch { spin.animateTo(-720f, tween(520, easing = Motion.outCubic)) }
             roll.snapTo(0f)
-            // fast from the first frame, slowing into 0:00 (no slow start: that read as lag)
-            roll.animateTo(1f, tween(480, easing = androidx.compose.animation.core.LinearEasing)) {
-                val e = value
-                shown = (1f - e).let { it * it * it }
+            // straight back at an even speed and a dead stop at 0:00: no slow start and no slow
+            // last stretch (both read as the bar lagging)
+            roll.animateTo(1f, tween(360, easing = androidx.compose.animation.core.LinearEasing)) {
+                shown = 1f - value
             }
             // it stops dead at the start: no bounce past 0:00 (that read as the bar jumping forward)
             shown = 0f

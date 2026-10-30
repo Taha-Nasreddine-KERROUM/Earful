@@ -152,6 +152,9 @@ fun SearchScreen(
     onClose: () -> Unit,
     /** Bumped to put the cursor back in the field (and the keyboard up). */
     refocus: Int = 0,
+    /** False while the player is open over search: the field can't hold the cursor (or the
+     *  keyboard) then, whatever else happens. */
+    typingAllowed: Boolean = true,
     model: SearchModel = viewModel(),
 ) {
     val p = LocalPalette.current
@@ -237,6 +240,7 @@ fun SearchScreen(
                             value = model.field,
                             onValueChange = { model.field = it },
                             singleLine = true,
+                            enabled = typingAllowed,
                             textStyle = Type.body.copy(color = p.label),
                             cursorBrush = SolidColor(p.accent),
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),

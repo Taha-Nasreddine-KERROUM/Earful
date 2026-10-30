@@ -386,7 +386,7 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
         if (np != null) Box(Modifier.fillMaxSize().graphicsLayer { alpha = if (Hole.isActive) 0f else 0.18f * playerOpen() }.background(Color.Black))
 
         if (search.shown) {
-            SearchScreen(contentBottom, search, onPlay = ::play, onQueue = ::enqueue, onClose = ::closeSearch, refocus = refocus)
+            SearchScreen(contentBottom, search, onPlay = ::play, onQueue = ::enqueue, onClose = ::closeSearch, refocus = refocus, typingAllowed = !playerUp)
         }
         SearchMorph(search)
 

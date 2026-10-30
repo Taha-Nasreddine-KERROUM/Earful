@@ -402,13 +402,6 @@ fun QueuePanel(
                     } else Modifier.animateItem()).eatable(),
                 )
             }
-            if (entries.none { !it.passed && !it.current }) item(key = "empty") {
-                Text(
-                    "Nothing queued yet. Tap the queue icon under the bookmark on any video to add it here.",
-                    Type.footnote, color = Color.White.copy(alpha = 0.45f),
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 18.dp),
-                )
-            }
         }
     }
 }
