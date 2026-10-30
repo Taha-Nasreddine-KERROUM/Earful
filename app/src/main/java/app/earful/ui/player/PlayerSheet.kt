@@ -1029,7 +1029,7 @@ fun PlayerSheet(
                 Box(
                     Modifier.fillMaxSize()
                         .graphicsLayer { alpha = if (Hole.gone(HoleLayer.Queue)) 0f else sheet.queue.value.coerceIn(0f, 1f) }
-                        .background(Color.Black.copy(alpha = 0.18f))
+                        .background(Color.Black.copy(alpha = 0.35f))
                         .clickable(remember { MutableInteractionSource() }, null, onClickLabel = "Close queue") {
                             scope.launch { sheet.closeQueue(tapped = true) }
                         }
@@ -1043,6 +1043,8 @@ fun PlayerSheet(
                     downloads = downloads,
                     onJump = { conn.jumpTo(it) },
                     onRemove = { conn.remove(it) },
+                    onMove = { from, to -> conn.move(from, to) },
+                    onPlayPause = { if (np.ended) conn.replay() else conn.togglePlay() },
                     playing = np.playing,
                     soundPosition = { conn.positionMs() * 1000L },
                     onClose = { scope.launch { sheet.closeQueue(tapped = true) } },

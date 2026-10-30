@@ -120,7 +120,7 @@ class PlaybackService : MediaSessionService() {
                 notePassed()
                 updateWindow(); recordListen(); saveSession()
             }
-            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = safely { updateWindow(); saveSession() }
+            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = safely { notePassed(); updateWindow(); saveSession() }
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) = safely { recover() }
             override fun onIsPlayingChanged(isPlaying: Boolean) = safely { saveSession() }
             override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) = safely { saveSession() }

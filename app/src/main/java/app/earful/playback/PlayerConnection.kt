@@ -155,6 +155,12 @@ class PlayerConnection(private val context: Context) {
         c.removeMediaItem(index)
     }
 
+    /** Moves a queue row to another place; the one playing keeps playing. */
+    fun move(from: Int, to: Int) = withController { c ->
+        if (from !in 0 until c.mediaItemCount || to !in 0 until c.mediaItemCount || from == to) return@withController
+        c.moveMediaItem(from, to)
+    }
+
     /** "Try again" after an error: same track, same queue. */
     fun retry(video: Video) {
         val c = controller

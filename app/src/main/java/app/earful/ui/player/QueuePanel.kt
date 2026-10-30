@@ -10,6 +10,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.ui.zIndex
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -106,8 +109,10 @@ class QueueRowsMotion {
     @Volatile var rowHeld = false
     /** A row is being swiped away (or draining): the queue holds perfectly still meanwhile. */
     var deleting by mutableStateOf(false)
+    /** A row is held up and being moved to another place. */
+    var reordering by mutableStateOf(false)
     /** The queue must not move now. */
-    val frozen get() = rowHeld || deleting
+    val frozen get() = rowHeld || deleting || reordering
     /** The queue is fully open and still: only then can a row be swiped away. */
     var panelStill: () -> Boolean = { true }
 
@@ -144,6 +149,10 @@ fun QueuePanel(
     onRemove: (Int) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    /** A row moved from one place in the queue to another (playlist positions). */
+    onMove: (from: Int, to: Int) -> Unit = { _, _ -> },
+    /** The playing row tapped: play / pause. */
+    onPlayPause: () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
@@ -226,6 +235,81 @@ fun QueuePanel(
 
     rows.panelStill = { !open.isRunning && open.value > 0.999f }
 
+    // ----- holding a row up and moving it -------------------------------------------------------
+    // Long-press a row: it lifts off the list and follows your finger; the others make room. Let
+    // go and it settles into its new place (the real queue changes then, not before).
+    val view = LocalView.current
+    var working by remember { mutableStateOf<List<QueueEntry>?>(null) }
+    var dragKey by remember { mutableStateOf<Long?>(null) }
+    val dragY = remember { mutableFloatStateOf(0f) }
+    val lift = remember { Animatable(0f) }
+    val entries = working ?: queue.entries
+    // once the real queue has the new order (or after a moment, if it didn't take), show it again
+    LaunchedEffect(queue, dragKey) {
+        val w = working ?: return@LaunchedEffect
+        if (dragKey != null) return@LaunchedEffect
+        if (queue.entries.map { it.uid } != w.map { it.uid }) delay(1500)
+        working = null
+    }
+    fun reorderStep() {
+        val key = dragKey ?: return
+        val w = working ?: return
+        val info = list.layoutInfo.visibleItemsInfo
+        val me = info.firstOrNull { it.key == key } ?: return
+        val center = me.offset + dragY.floatValue + me.size / 2f
+        val other = info.firstOrNull { it.key != key && it.key is Long && center > it.offset && center < it.offset + it.size } ?: return
+        val from = w.indexOfFirst { it.uid == key }
+        val to = w.indexOfFirst { it.uid == other.key }
+        if (from < 0 || to < 0) return
+        working = w.toMutableList().apply { add(to, removeAt(from)) }
+        dragY.floatValue -= (other.offset - me.offset) // it will be laid out where that one was
+        Haptics.tick(view)
+    }
+    fun liftRow(e: QueueEntry) {
+        if (dragKey != null) return
+        working = queue.entries
+        dragKey = e.uid
+        dragY.floatValue = 0f
+        rows.reordering = true
+        Haptics.confirm(view)
+        scope.launch { lift.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.6f, stiffness = 500f)) }
+    }
+    fun dropRow() {
+        val key = dragKey ?: return
+        val w = working
+        val e = queue.entries.firstOrNull { it.uid == key }
+        val to = w?.indexOfFirst { it.uid == key } ?: -1
+        if (e != null && to >= 0 && to != e.index) onMove(e.index, to)
+        scope.launch {
+            launch { lift.animateTo(0f, androidx.compose.animation.core.spring(dampingRatio = 0.8f, stiffness = 400f)) }
+            androidx.compose.animation.core.animate(dragY.floatValue, 0f, animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.8f, stiffness = 400f)) { v, _ -> dragY.floatValue = v }
+            dragKey = null
+            rows.reordering = false
+        }
+    }
+    // Held near the top or bottom edge: the list scrolls along.
+    LaunchedEffect(dragKey) {
+        if (dragKey == null) return@LaunchedEffect
+        val edge = 56f * unit
+        while (dragKey != null && lift.targetValue == 1f) {
+            withFrameNanos { }
+            val info = list.layoutInfo
+            val me = info.visibleItemsInfo.firstOrNull { it.key == dragKey } ?: continue
+            val top = me.offset + dragY.floatValue
+            val bottom = top + me.size
+            val speed = when {
+                top < info.viewportStartOffset + edge -> -((info.viewportStartOffset + edge - top) / edge).coerceIn(0f, 1f) * 14f * unit
+                bottom > info.viewportEndOffset - edge -> ((bottom - (info.viewportEndOffset - edge)) / edge).coerceIn(0f, 1f) * 14f * unit
+                else -> 0f
+            }
+            if (speed != 0f) {
+                val moved = list.scrollBy(speed)
+                dragY.floatValue += moved
+                reorderStep()
+            }
+        }
+    }
+
     LaunchedEffect(queue.currentIndex) {
         if (queue.currentIndex >= 0 && open.value < 0.05f) list.scrollToItem((queue.currentIndex - 1).coerceAtLeast(0))
     }
@@ -287,9 +371,14 @@ fun QueuePanel(
             userScrollEnabled = !rows.deleting,
             contentPadding = PaddingValues(bottom = navBottom + 16.dp),
         ) {
-            itemsIndexed(queue.entries, key = { _, e -> e.uid }) { i, e ->
+            itemsIndexed(entries, key = { _, e -> e.uid }) { i, e ->
+                val held = e.uid == dragKey
                 QueueRow(
                     entry = e,
+                    onLift = { liftRow(e) },
+                    onDrag = { dy -> dragY.floatValue += dy; reorderStep() },
+                    onDrop = { dropRow() },
+                    onPlayPause = onPlayPause,
                     playing = playing,
                     soundPosition = soundPosition,
                     download = if (e.index == queue.currentIndex + 1) downloads[e.video.id] else null,
@@ -297,10 +386,19 @@ fun QueuePanel(
                     order = { i - list.firstVisibleItemIndex },
                     onTap = { if (!e.current) onJump(e.index) },
                     onRemove = { onRemove(e.index) },
-                    modifier = Modifier.animateItem().eatable(),
+                    modifier = (if (held) Modifier.zIndex(1f).graphicsLayer {
+                        // lifted off the list: a little bigger, with a shadow, on its own card
+                        val l = lift.value
+                        translationY = dragY.floatValue
+                        scaleX = 1f + 0.035f * l; scaleY = scaleX
+                        shadowElevation = 16.dp.toPx() * l
+                        shape = RoundedCornerShape(12.dp)
+                    }.drawBehind {
+                        drawRoundRect(Color(0xFF2E2E31).copy(alpha = lift.value.coerceIn(0f, 1f)), cornerRadius = androidx.compose.ui.geometry.CornerRadius(12.dp.toPx()))
+                    } else Modifier.animateItem()).eatable(),
                 )
             }
-            if (queue.entries.none { !it.passed && !it.current }) item(key = "empty") {
+            if (entries.none { !it.passed && !it.current }) item(key = "empty") {
                 Text(
                     "Nothing queued yet. Tap the queue icon under the bookmark on any video to add it here.",
                     Type.footnote, color = Color.White.copy(alpha = 0.45f),
@@ -327,8 +425,14 @@ private fun QueueRow(
     onTap: () -> Unit,
     onRemove: () -> Unit,
     modifier: Modifier,
+    onLift: () -> Unit = {},
+    onDrag: (Float) -> Unit = {},
+    onDrop: () -> Unit = {},
+    onPlayPause: () -> Unit = {},
 ) {
     val view = LocalView.current
+    // (a long press that lifted the row isn't also a tap when the finger comes up)
+    var justLifted by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val unit = LocalDensity.current.density
     val remove by rememberUpdatedState(onRemove)
@@ -511,7 +615,19 @@ private fun QueueRow(
                         }
                     }
                 )
-                .clickable(onClick = onTap)
+                // Long-press anywhere on the row: it lifts and moves with your finger.
+                .pointerInput(entry.uid) {
+                    detectDragGesturesAfterLongPress(
+                        onDragStart = { justLifted = true; onLift() },
+                        onDragEnd = { onDrop(); scope.launch { delay(120); justLifted = false } },
+                        onDragCancel = { onDrop(); scope.launch { delay(120); justLifted = false } },
+                    ) { change, amount -> change.consume(); onDrag(amount.y) }
+                }
+                .clickable {
+                    if (justLifted) { justLifted = false; return@clickable }
+                    // the playing one: play / pause; any other: play that one
+                    if (entry.current) onPlayPause() else onTap()
+                }
                 .padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {

@@ -44,6 +44,9 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -150,66 +153,112 @@ fun ChannelScreen(
 ) {
     val p = LocalPalette.current
     val scope = rememberCoroutineScope()
+    val density = androidx.compose.ui.platform.LocalDensity.current
     val model = remember(ref) { ChannelModel(ref, scope) }
-    var sort by remember(ref) { mutableStateOf(ChannelSort.New) }
+    // New and Popular sit side by side: swipe between them, or tap their pills.
+    val pager = androidx.compose.foundation.pager.rememberPagerState { ChannelSort.entries.size }
+    val sort = ChannelSort.entries[pager.targetPage]
     val saved by Library.saved.collectAsStateWithLifecycle()
     val savedIds = remember(saved) { saved.mapTo(HashSet()) { it.id } }
     val statusTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
     LaunchedEffect(ref) { model.list(ChannelSort.New); model.start(ChannelSort.New) }
+    // (a list is only fetched once you go to it)
     LaunchedEffect(sort, model.info) { model.load(sort) }
 
-    // Each sort keeps its own place in the list.
+    // Each sort keeps its own place in its list.
     val states = remember(ref) { ChannelSort.entries.associateWith { LazyListState() } }
-    val list = states.getValue(sort)
-    LaunchedEffect(list, sort) {
-        snapshotFlow { list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
-            .distinctUntilChanged()
-            .filter { it >= list.layoutInfo.totalItemsCount - 5 }
-            .collect { model.more(sort) }
-    }
     val name = model.info?.name?.ifBlank { null } ?: ref.name
-    // The name moves up into the bar once the big one has scrolled away.
-    val titleIn by remember(list) { derivedStateOf { list.firstVisibleItemIndex > 0 || list.firstVisibleItemScrollOffset > 140 } }
+
+    // The channel's header (logo, name) scrolls away with the videos and comes back as soon as
+    // you scroll back up; New · Popular stay pinned under the bar.
+    var headH by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    var pillsH by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    val collapse = remember { androidx.compose.runtime.mutableFloatStateOf(0f) }
+    val collapsible = (headH - pillsH).coerceAtLeast(0).toFloat()
+    val nested = remember(collapsible) {
+        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+            override fun onPostScroll(
+                consumed: androidx.compose.ui.geometry.Offset, available: androidx.compose.ui.geometry.Offset,
+                source: androidx.compose.ui.input.nestedscroll.NestedScrollSource,
+            ): androidx.compose.ui.geometry.Offset {
+                if (consumed.y != 0f) collapse.floatValue = (collapse.floatValue - consumed.y).coerceIn(0f, collapsible)
+                return androidx.compose.ui.geometry.Offset.Zero
+            }
+        }
+    }
+    // Arriving on the other list near its top: the header comes back down to meet it.
+    LaunchedEffect(pager.settledPage, collapsible) {
+        val l = states.getValue(ChannelSort.entries[pager.settledPage])
+        if (l.firstVisibleItemIndex == 0) collapse.floatValue = minOf(collapse.floatValue, l.firstVisibleItemScrollOffset.toFloat())
+    }
+    val titleIn by remember { derivedStateOf { collapsible > 0f && collapse.floatValue > collapsible * 0.7f } }
     val titleA by animateFloatAsState(if (titleIn) 1f else 0f, tween(180), label = "title")
+    val headTop = statusTop + 56.dp
 
     Box(modifier.fillMaxSize().eatable(page = true, fill = p.bg, layer = HoleLayer.Channel).blockTouches().background(p.bg)) {
     CompositionLocalProvider(LocalHoleLayer provides HoleLayer.Channel) {
-        val l = model.list(sort)
-        LazyColumn(
-            state = list,
-            contentPadding = PaddingValues(top = statusTop + 56.dp, bottom = bottomPadding + 16.dp),
-            modifier = Modifier.fillMaxSize(),
+        androidx.compose.foundation.pager.HorizontalPager(
+            state = pager,
+            beyondViewportPageCount = 1,
+            modifier = Modifier.fillMaxSize().nestedScroll(nested),
+        ) { page ->
+            val pageSort = ChannelSort.entries[page]
+            val list = states.getValue(pageSort)
+            LaunchedEffect(list, pageSort) {
+                snapshotFlow { list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0 }
+                    .distinctUntilChanged()
+                    .filter { it >= list.layoutInfo.totalItemsCount - 5 }
+                    .collect { model.more(pageSort) }
+            }
+            val l = model.list(pageSort)
+            LazyColumn(
+                state = list,
+                contentPadding = PaddingValues(top = headTop + with(density) { headH.toDp() }, bottom = bottomPadding + 16.dp),
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                when {
+                    l.loading && l.items.isEmpty() -> items(3) { VideoCardSkeleton() }
+                    l.failed && l.items.isEmpty() -> item {
+                        Message("Couldn't load this channel", "Check your connection.", "Try again") {
+                            if (model.info == null) model.start(pageSort) else model.load(pageSort)
+                        }
+                    }
+                    l.items.isEmpty() && !l.loading -> item { Message("No videos", "This channel hasn't posted any yet.", null) {} }
+                    else -> itemsIndexed(l.items, key = { _, v -> v.id }) { _, v ->
+                        VideoCard(
+                            v, saved = v.id in savedIds, onOpen = { onPlay(v) },
+                            onToggleSave = { Library.toggleSaved(v) }, onQueue = { onQueue(v) },
+                            modifier = Modifier.animateItem(),
+                        )
+                    }
+                }
+            }
+        }
+        // ----- header: logo and name, then New · Popular ------------------------------------------
+        Column(
+            Modifier.fillMaxWidth().padding(top = headTop)
+                .onSizeChanged { headH = it.height }
+                .graphicsLayer { translationY = -collapse.floatValue }
+                .background(p.bg),
         ) {
-            item(key = "head") {
-                Column(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    val logoVideo = remember(model.info, ref) {
-                        ref.fromVideo.copy(channelUrl = model.info?.url ?: model.url ?: ref.url, channelAvatar = model.info?.avatar ?: ref.avatar)
-                    }
-                    ChannelLogo(logoVideo, 88.dp, sizePx = 264, onOpen = {})
-                    Spacer(Modifier.height(12.dp))
-                    Text(name, Type.title2, maxLines = 2, modifier = Modifier.padding(horizontal = 32.dp))
-                    val subs = model.info?.subscribers?.takeIf { it >= 0 }?.let(::subscribers)
-                    Text(subs ?: " ", Type.footnote, color = p.secondary, maxLines = 1, modifier = Modifier.padding(top = 3.dp))
+            Column(
+                Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 14.dp)
+                    .graphicsLayer { alpha = 1f - (collapse.floatValue / collapsible.coerceAtLeast(1f) * 1.3f).coerceIn(0f, 1f) },
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                val logoVideo = remember(model.info, ref) {
+                    ref.fromVideo.copy(channelUrl = model.info?.url ?: model.url ?: ref.url, channelAvatar = model.info?.avatar ?: ref.avatar)
                 }
+                ChannelLogo(logoVideo, 88.dp, sizePx = 264, onOpen = {})
+                Spacer(Modifier.height(12.dp))
+                Text(name, Type.title2, maxLines = 2, modifier = Modifier.padding(horizontal = 32.dp))
+                val subs = model.info?.subscribers?.takeIf { it >= 0 }?.let(::subscribers)
+                Text(subs ?: " ", Type.footnote, color = p.secondary, maxLines = 1, modifier = Modifier.padding(top = 3.dp))
             }
-            stickyHeader(key = "sort") {
-                SortBar(sort, onPick = { sort = it })
-            }
-            when {
-                l.loading && l.items.isEmpty() -> items(3) { VideoCardSkeleton() }
-                l.failed && l.items.isEmpty() -> item {
-                    Message("Couldn't load this channel", "Check your connection.", "Try again") {
-                        if (model.info == null) model.start(sort) else model.load(sort)
-                    }
-                }
-                l.items.isEmpty() -> item { Message("No videos", "This channel hasn't posted any yet.", null) {} }
-                else -> itemsIndexed(l.items, key = { _, v -> v.id }) { _, v ->
-                    VideoCard(
-                        v, saved = v.id in savedIds, onOpen = { onPlay(v) },
-                        onToggleSave = { Library.toggleSaved(v) }, onQueue = { onQueue(v) },
-                        modifier = Modifier.animateItem(),
-                    )
-                }
+            Box(Modifier.onSizeChanged { pillsH = it.height }) {
+                SortBar({ pager.currentPage + pager.currentPageOffsetFraction }, onPick = { s ->
+                    scope.launch { pager.animateScrollToPage(s.ordinal, animationSpec = app.earful.ui.theme.Motion.sheet()) }
+                })
             }
         }
         // ----- bar ------------------------------------------------------------------------------
@@ -230,26 +279,28 @@ fun ChannelScreen(
     }
 }
 
-/** New · Popular, as two pills; the chosen one is filled. */
+/** New · Popular, as two pills; the filled one follows the page as you swipe. */
 @Composable
-private fun SortBar(sort: ChannelSort, onPick: (ChannelSort) -> Unit) {
+private fun SortBar(position: () -> Float, onPick: (ChannelSort) -> Unit) {
     val p = LocalPalette.current
     Row(
         Modifier.fillMaxWidth().background(p.bg).padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         ChannelSort.entries.forEach { s ->
-            val on = s == sort
-            val k by animateFloatAsState(if (on) 1f else 0f, Motion.snappy(), label = "pill")
+            // how much this pill is "on" right now (0..1), read while drawing only
+            fun on() = (1f - kotlin.math.abs(position() - s.ordinal)).coerceIn(0f, 1f)
             Box(
                 Modifier
-                    .pressable(scaleTo = 0.94f, label = s.label) { if (!on) onPick(s) }
+                    .pressable(scaleTo = 0.94f, label = s.label) { onPick(s) }
                     .clip(RoundedCornerShape(50))
-                    .background(androidx.compose.ui.graphics.lerp(p.fill, p.label, k))
+                    .drawBehind { drawRect(androidx.compose.ui.graphics.lerp(p.fill, p.label, on())) }
                     .padding(horizontal = 16.dp, vertical = 7.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(s.label, Type.subheadStrong, color = androidx.compose.ui.graphics.lerp(p.label, p.bg, k), maxLines = 1)
+                // the label is drawn twice, dark and light, crossfading as the pill fills
+                Text(s.label, Type.subheadStrong, color = p.label, maxLines = 1, modifier = Modifier.graphicsLayer { alpha = 1f - on() })
+                Text(s.label, Type.subheadStrong, color = p.bg, maxLines = 1, modifier = Modifier.graphicsLayer { alpha = on() })
             }
         }
     }
