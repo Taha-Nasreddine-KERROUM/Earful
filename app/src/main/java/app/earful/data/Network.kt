@@ -22,6 +22,15 @@ object Network {
         .connectionPool(ConnectionPool(4, 60, TimeUnit.SECONDS))
         .retryOnConnectionFailure(true)
         .build()
+
+    /**
+     * The same client (same sockets) for answers that are text — YouTube's pages and the sponsor
+     * list: asks for them Brotli-packed, about a fifth smaller than gzip. Audio and pictures don't
+     * shrink that way, so they stay on [client] untouched.
+     */
+    val text: OkHttpClient = client.newBuilder()
+        .addInterceptor(okhttp3.brotli.BrotliInterceptor)
+        .build()
 }
 
 /** Bridges NewPipeExtractor's HTTP calls onto OkHttp. Requests go straight to youtube.com. */
@@ -36,7 +45,7 @@ object YouTubeHttp : Downloader() {
             builder.removeHeader(name)
             values.forEach { builder.addHeader(name, it) }
         }
-        Network.client.newCall(builder.build()).execute().use { res ->
+        Network.text.newCall(builder.build()).execute().use { res ->
             if (res.code == 429) throw ReCaptchaException("YouTube asked for a captcha", request.url())
             return Response(
                 res.code,

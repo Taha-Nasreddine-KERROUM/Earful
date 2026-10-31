@@ -56,6 +56,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -529,7 +530,8 @@ fun PlayerSheet(
     np: NowPlaying,
     conn: PlayerConnection,
     sheet: SheetState,
-    bottomBarHeight: Dp,
+    /** The tab bar's height right now (it slides away in search): read while laying out only. */
+    bottomBarHeight: () -> Dp,
     water: Water,
     tabBarShown: Boolean,
     onClosed: () -> Unit,
@@ -638,16 +640,16 @@ fun PlayerSheet(
         var controlsH by remember { mutableFloatStateOf(340.dp.px()) }
         val miniH = MiniHeight.px()
         val margin = MiniMargin.px()
-        val collapsedTop = H - bottomBarHeight.px() - margin - miniH
-        val dragRange = collapsedTop.coerceAtLeast(1f)
+        // Where the mini player rests follows the tab bar as it slides away: worked out when it's
+        // used (laying out, a drag), never while composing, so the bar's slide rebuilds nothing.
+        fun collapsedTop() = H - bottomBarHeight().px() - margin - miniH
+        fun dragRange() = collapsedTop().coerceAtLeast(1f)
 
         val w = sheet.water
         w.unit = unit
-        w.range = dragRange
         sheet.pageH = H
         sheet.pageW = W
-        sheet.miniTop = collapsedTop
-        w.topOf = { q -> (if (sheet.direct) (1f - q) * H else lerp(collapsedTop - lift(), 0f, q)) + sheet.dismiss.value }
+        w.topOf = { q -> (if (sheet.direct) (1f - q) * H else lerp(collapsedTop() - lift(), 0f, q)) + sheet.dismiss.value }
         w.onLand = { push ->
             // The tab bar's surface ripples where the mini player lands on it.
             if (tabBarShown) water.ripple(W / 2, (2.5f + push / 60f).coerceIn(3f, 7f) * unit, 70f * unit, 11f * unit, 1.1f)
@@ -729,7 +731,10 @@ fun PlayerSheet(
                     val p = pNow()
                     w.frame // moves with the water (the landing dip)
                     val direct = sheet.direct // opened from a list: a full page rising from the bottom edge
-                    val top = (if (direct) (1f - p) * H else lerp(collapsedTop - lift(), 0f, p)) + sheet.dismiss.value + w.dip
+                    val rest = collapsedTop()
+                    w.range = rest.coerceAtLeast(1f)
+                    sheet.miniTop = rest
+                    val top = (if (direct) (1f - p) * H else lerp(rest - lift(), 0f, p)) + sheet.dismiss.value + w.dip
                     val side = if (direct) 0f else lerp(margin, 0f, p)
                     val pl = m.measure(Constraints.fixed((W - side * 2f).roundToInt(), (if (direct) H else lerp(miniH, H, p)).roundToInt()))
                     layout(pl.width, pl.height) {
@@ -801,7 +806,7 @@ fun PlayerSheet(
                         }
                     }
                 }
-                .pointerInput(dragRange, queueRange) {
+                .pointerInput(queueRange) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         if (sheet.direct) return@awaitEachGesture // still rising into place
@@ -844,7 +849,7 @@ fun PlayerSheet(
                                 if (crossed && shown < closeAt * 0.8f) crossed = false
                                 scope.launch { sheet.dismiss.snapTo(shown) }
                             } else {
-                                scope.launch { sheet.progress.snapTo((sheet.progress.value - dy / dragRange).coerceIn(0f, 1f)) }
+                                scope.launch { sheet.progress.snapTo((sheet.progress.value - dy / dragRange()).coerceIn(0f, 1f)) }
                             }
                         }
                         lastY = screenY(afterSlop) - afterSlop.positionChange().y
@@ -876,7 +881,7 @@ fun PlayerSheet(
                                 if (sheet.dismiss.value > closeAt || vy > 450.dp.toPx()) sink()
                                 else sheet.dismiss.animateTo(0f, Motion.snapBack())
                             } else {
-                                val v = -vy / dragRange
+                                val v = -vy / dragRange()
                                 // Light flick or a short pull is enough: commit after ~18% of the
                                 // travel in the direction you started, instead of half the screen.
                                 val flick = 220.dp.toPx()
@@ -905,7 +910,7 @@ fun PlayerSheet(
                     np = shownNp, conn = conn,
                     onReplay = { pos = 0L; conn.replay() },
                     textStart = with(density) { (miniArt.x + miniArt.w).toDp() } + 12.dp,
-                    progress = if (np.durationMs > 0) pos.toFloat() / np.durationMs else 0f,
+                    progress = { if (np.durationMs > 0) pos.toFloat() / np.durationMs else 0f },
                     modifier = Modifier
                         .layout { m, c ->
                             val pl = m.measure(Constraints.fixed((W - margin * 2f).roundToInt(), miniH.roundToInt()))
@@ -960,7 +965,7 @@ fun PlayerSheet(
                             ).wrapContentHeight(Alignment.CenterVertically)
                         }
                         NowPlayingControls(
-                            np = np, conn = conn, positionMs = pos, downloaded = downloaded, justSaved = justSaved,
+                            np = np, conn = conn, positionMs = { pos }, downloaded = downloaded, justSaved = justSaved,
                             error = error, saved = saved, onToggleSave = { Library.toggleSaved(np.video) },
                             upcoming = queue.upcoming,
                             showUpNext = hasQueue,
@@ -1014,8 +1019,7 @@ fun PlayerSheet(
                     ArtworkGestures(
                         enabled = fullyOpen,
                         playing = np.playing,
-                        onSeek = { s -> conn.seekBy(s * 1000L) },
-                        canSeek = { s -> !np.video.isLive || conn.liveRoom(s * 1000L) },
+                        onSeek = { s -> conn.skip(s * 1000L) },
                         onToggle = { conn.togglePlay() },
                         modifier = Modifier.fillMaxSize(),
                         showHint = hintPending && fullyOpen,
@@ -1070,7 +1074,7 @@ private fun MiniContent(
     np: NowPlaying,
     conn: PlayerConnection,
     textStart: Dp,
-    progress: Float,
+    progress: () -> Float,
     modifier: Modifier,
     onExpand: () -> Unit,
     swipeX: () -> Float,
@@ -1108,7 +1112,8 @@ private fun MiniContent(
 private fun NowPlayingControls(
     np: NowPlaying,
     conn: PlayerConnection,
-    positionMs: Long,
+    /** Where playback is (ms): read only by the parts that show it, so the rest isn't rebuilt. */
+    positionMs: () -> Long,
     downloaded: Float,
     justSaved: Boolean,
     error: String?,
@@ -1146,11 +1151,20 @@ private fun NowPlayingControls(
         Column(Modifier.graphicsLayer { translationY = controlsShift() }) {
             Spacer(Modifier.height(26.dp))
             val ads by PlaybackEvents.ads.collectAsStateWithLifecycle()
-            LaunchedEffect(positionMs, rewind.shown != null, rewind.atStart) { if (rewind.shown != null && positionMs < 2_000) rewind.atStart = true }
-            val shownMs = rewind.shown?.let { (it * np.durationMs).toLong() } ?: positionMs
+            LaunchedEffect(rewind.shown != null, rewind.atStart) {
+                if (rewind.shown != null && !rewind.atStart) {
+                    snapshotFlow { positionMs() }.first { it < 2_000 }
+                    rewind.atStart = true
+                }
+            }
+            val dur = np.durationMs
             Box(Modifier.eatable(layer = HoleLayer.Player)) {
-                if (np.video.isLive) LiveBar(behindMs = (np.durationMs - positionMs).coerceAtLeast(0), settled = np.playing && !np.waiting, onNow = { conn.goLive() })
-                else Scrubber(shownMs, np.durationMs, downloaded, onSeek = conn::seekTo, ads = ads[np.video.id].orEmpty(), follow = rewind.shown != null)
+                if (np.video.isLive) LiveBar(behindMs = { (dur - positionMs()).coerceAtLeast(0) }, settled = np.playing && !np.waiting, onNow = { conn.goLive() })
+                else Scrubber(
+                    position = { rewind.shown?.let { (it * dur).toLong() } ?: positionMs() },
+                    durationMs = dur, downloaded = downloaded, onSeek = conn::seekTo,
+                    ads = ads[np.video.id].orEmpty(), follow = rewind.shown != null,
+                )
             }
             Spacer(Modifier.height(18.dp))
             Row(
@@ -1158,11 +1172,14 @@ private fun NowPlayingControls(
                 horizontalArrangement = Arrangement.SpaceEvenly,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // Live: a skip is offered only if there really is that much to skip (behind you,
-                // or between you and now).
+                // A skip only goes as far as there is (7 s left: +7), and at the very start or end
+                // the button rests (dimmed) and does nothing. Live: "the end" is now.
                 val live = np.video.isLive
-                val ahead = (np.durationMs - positionMs - LIVE_MARGIN_MS).coerceAtLeast(0)
-                SkipButton(forward = false, enabled = !live || positionMs >= 10_000) { conn.seekBy(-10_000) }
+                val canBack by remember(dur, live) { derivedStateOf { conn.room(false, positionMs(), dur, live) >= 500 } }
+                val canForward by remember(dur, live, np.ended) {
+                    derivedStateOf { !np.ended && conn.room(true, positionMs(), dur, live) >= 500 }
+                }
+                SkipButton(forward = false, enabled = canBack) { -conn.skip(-10_000) }
                 val ending = np.ended || rewind.running
                 CircleButton(
                     modifier = Modifier.eatable(layer = HoleLayer.Player),
@@ -1175,7 +1192,7 @@ private fun NowPlayingControls(
                         tint = Color.White, size = 56.dp, replay = true, spin = { rewind.spin.value },
                     )
                 }
-                SkipButton(forward = true, enabled = !live || ahead >= 10_000) { conn.seekBy(10_000) }
+                SkipButton(forward = true, enabled = canForward) { conn.skip(10_000) }
             }
             Spacer(Modifier.height(20.dp))
             Box(Modifier.eatable(layer = HoleLayer.Player)) { StatusLine(np, downloaded, justSaved, error, onRetry = { conn.retry(np.video) }) }
@@ -1195,11 +1212,13 @@ private fun NowPlayingControls(
  * says how far behind you are, and tapping it jumps back to now.
  */
 @Composable
-private fun LiveBar(behindMs: Long, settled: Boolean, onNow: () -> Unit) {
+private fun LiveBar(behindMs: () -> Long, settled: Boolean, onNow: () -> Unit) {
     // Only once it's really playing, and has stayed behind a moment: while a live starts, the
     // player briefly reports itself at the far start of the broadcast before jumping to now,
     // and that must not flash up as "behind".
-    val want = settled && behindMs > 25_000
+    val settledNow by rememberUpdatedState(settled)
+    val want by remember { derivedStateOf { settledNow && behindMs() > 25_000 } }
+    val behindSec by remember { derivedStateOf { behindMs() / 1000 } }
     var behind by remember { mutableStateOf(false) }
     LaunchedEffect(want) { if (want) { delay(1200); behind = true } else behind = false }
     Box(Modifier.fillMaxWidth().height(44.dp), contentAlignment = Alignment.Center) {
@@ -1213,7 +1232,7 @@ private fun LiveBar(behindMs: Long, settled: Boolean, onNow: () -> Unit) {
             Box(Modifier.size(7.dp).clip(CircleShape).background(if (behind) app.earful.ui.components.LiveRed else Color.White))
             Spacer(Modifier.width(7.dp))
             Text(
-                if (behind) "${behindMs / 60_000}:${"%02d".format((behindMs / 1000) % 60)} behind · back to live" else "LIVE",
+                if (behind) "${behindSec / 60}:${"%02d".format(behindSec % 60)} behind · back to live" else "LIVE",
                 Type.captionStrong.copy(fontFeatureSettings = "tnum"), color = Color.White, maxLines = 1,
             )
         }
@@ -1226,7 +1245,8 @@ private fun StatusLine(np: NowPlaying, downloaded: Float, justSaved: Boolean, er
     val dim = Color.White.copy(alpha = 0.55f)
     val complete = downloaded >= 1f
     // "Available offline": only right as the download finishes (2 s), fading in and out.
-    val offlineAlpha by animateFloatAsState(if (justSaved) 1f else 0f, tween(if (justSaved) 250 else 500), label = "offline")
+    val offlineFade = animateFloatAsState(if (justSaved) 1f else 0f, tween(if (justSaved) 250 else 500), label = "offline")
+    val offlineShown by remember { derivedStateOf { offlineFade.value > 0.01f } }
     Row(
         Modifier.fillMaxWidth().height(28.dp),
         horizontalArrangement = Arrangement.Center,
@@ -1243,7 +1263,7 @@ private fun StatusLine(np: NowPlaying, downloaded: Float, justSaved: Boolean, er
                         .clickable(onClick = onRetry).padding(horizontal = 12.dp, vertical = 5.dp)
                 ) { Text("Try again", Type.captionStrong, color = Color.White) }
             }
-            complete && (justSaved || offlineAlpha > 0.01f) -> Row(Modifier.graphicsLayer { alpha = offlineAlpha }, verticalAlignment = Alignment.CenterVertically) {
+            complete && (justSaved || offlineShown) -> Row(Modifier.graphicsLayer { alpha = offlineFade.value }, verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Check, dim, size = 15.dp)
                 Spacer(Modifier.width(6.dp))
                 Text("Available offline", Type.footnote, color = dim)
@@ -1376,6 +1396,8 @@ fun CircleButton(
     enabled: Boolean = true,
     highlight: Color = Color.White.copy(alpha = 0.12f),
     label: String? = null,
+    /** Tick on every tap (off when the button decides for itself whether anything happened). */
+    haptic: Boolean = true,
     content: @Composable () -> Unit,
 ) {
     val source = remember { MutableInteractionSource() }
@@ -1388,9 +1410,10 @@ fun CircleButton(
             .size(size)
             .graphicsLayer { scaleX = s; scaleY = s }
             .clip(CircleShape)
-            .background(highlight.copy(alpha = highlight.alpha * bg))
+            .drawBehind { if (bg > 0f) drawRect(highlight.copy(alpha = highlight.alpha * bg)) } // (read while drawing: a press redraws, never recomposes)
             .clickable(source, null, enabled = enabled, role = Role.Button, onClickLabel = label) {
-                Haptics.tick(view); onClick()
+                if (haptic) Haptics.tick(view)
+                onClick()
             },
         contentAlignment = Alignment.Center,
     ) { content() }

@@ -20,17 +20,27 @@ object Session {
 
     fun init(context: Context) { file = File(context.filesDir, "session.json") }
 
+    /** The queue as last written: while it stays the same, only the place in it is rewritten. */
+    @Volatile private var itemsJson: String? = null
+
     fun save(items: List<Video>, index: Int, positionMs: Long) {
         if (items.isEmpty()) { clear(); return }
-        val o = JSONObject()
-            .put("items", JSONArray(items.map { it.toJson() }))
-            .put("index", index)
-            .put("pos", positionMs.coerceAtLeast(0))
-        runCatching {
-            val tmp = File(file.parentFile, file.name + ".tmp")
-            tmp.writeText(o.toString())
-            tmp.renameTo(file) // never a half-written session
-        }
+        val json = JSONArray(items.map { it.toJson() }).toString()
+        itemsJson = json
+        write(json, index, positionMs)
+    }
+
+    /** Only where in the (unchanged) queue you are. False if the queue hasn't been written yet. */
+    fun savePlace(index: Int, positionMs: Long): Boolean {
+        val json = itemsJson ?: return false
+        write(json, index, positionMs)
+        return true
+    }
+
+    private fun write(items: String, index: Int, positionMs: Long) = runCatching {
+        val tmp = File(file.parentFile, file.name + ".tmp")
+        tmp.writeText("{\"items\":$items,\"index\":$index,\"pos\":${positionMs.coerceAtLeast(0)}}")
+        tmp.renameTo(file) // never a half-written session
     }
 
     fun load(): Saved? = runCatching {
@@ -45,5 +55,5 @@ object Session {
     /** The tracks whose audio is worth keeping: everything still in the queue. */
     fun keepIds(): Set<String> = load()?.items?.map { it.id }?.toSet().orEmpty()
 
-    fun clear() { if (::file.isInitialized) file.delete() }
+    fun clear() { itemsJson = null; if (::file.isInitialized) file.delete() }
 }

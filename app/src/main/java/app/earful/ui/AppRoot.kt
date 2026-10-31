@@ -140,7 +140,10 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
         snapshotFlow { imeTarget.getBottom(density).toFloat() }.collectLatest { target -> rideKeyboard(keyboardRide, target) }
     }
     val tabBarHeight = 52.dp + navBottom
-    val bottomBar by animateDpAsState(if (searchOpen) navBottom else tabBarHeight, label = "bar")
+    // The tab bar slides away in search. Only the player follows it frame by frame (reading it while
+    // laying out); the lists' bottom padding just takes where it ends up, so the slide rebuilds nothing.
+    val bottomBarNow = animateDpAsState(if (searchOpen) navBottom else tabBarHeight, label = "bar")
+    val bottomBar = if (searchOpen) navBottom else tabBarHeight
     val contentBottom = bottomBar + if (np != null) 72.dp else 0.dp
     // How far the tab bar sinks while search is open (dp): all the way under.
     val barSink = tabBarHeight.value + 18f
@@ -318,7 +321,7 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
         var prevT = 0L
         snapshotFlow { keyboardRide.floatValue }.collect { r ->
             val now = System.nanoTime()
-            val dock = with(density) { bottomBar.toPx() }
+            val dock = with(density) { bottomBarNow.value.toPx() }
             if (prev > dock + 1f && r <= dock + 1f && !searchOpen && conn.state.value != null &&
                 sheet.progress.value < 0.01f && sheet.dismiss.value == 0f
             ) {
@@ -429,13 +432,13 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
 
         np?.let { state ->
             PlayerSheet(
-                np = state, conn = conn, sheet = sheet, bottomBarHeight = bottomBar,
+                np = state, conn = conn, sheet = sheet, bottomBarHeight = { bottomBarNow.value },
                 water = water, tabBarShown = !searchOpen,
                 // In search, the mini player rides just above the keyboard, moving with it.
                 lift = {
                     val ride = keyboardRide.floatValue
                     // above the dock it rides the keyboard; a dip below 0 is the landing bounce
-                    (ride - with(density) { bottomBar.toPx() }).coerceAtLeast(0f) + ride.coerceAtMost(0f)
+                    (ride - with(density) { bottomBarNow.value.toPx() }).coerceAtLeast(0f) + ride.coerceAtMost(0f)
                 },
                 onClosed = {
                     conn.close()

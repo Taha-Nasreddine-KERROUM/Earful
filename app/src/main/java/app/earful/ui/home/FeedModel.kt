@@ -29,7 +29,7 @@ class FeedModel : ViewModel() {
             val started = System.currentTimeMillis()
             val seeds = Library.recentListened(3)
             if (seeds.isNotEmpty()) {
-                val lists = seeds.map { id -> async { runCatching { YouTube.related(id) }.getOrNull() } }.awaitAll()
+                val lists = seeds.map { id -> async { runCatching { YouTube.related(id, maxAgeMs = 10 * 60_000L) }.getOrNull() } }.awaitAll()
                 if (lists.all { it == null }) onFail("Couldn't refresh. Check your connection.")
                 else {
                     Library.refreshForYou(interleave(lists.map { it.orEmpty().take(12) }))

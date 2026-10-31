@@ -311,7 +311,7 @@ fun SearchScreen(
                                 }
                             }
                         }
-                        itemsIndexed(recent, key = { _, q -> "r$q" }) { i, q ->
+                        itemsIndexed(recent, key = { _, q -> "r$q" }, contentType = { _, _ -> "recent" }) { i, q ->
                             // Removing one: it slips under the water, and the ones below glide up.
                             val under = remember { Animatable(0f) }
                             val gone = remember { Animatable(0f) }
@@ -330,17 +330,17 @@ fun SearchScreen(
                             ) { go(q) }
                         }
                     } else {
-                        itemsIndexed(model.suggestions, key = { _, s -> "s$s" }) { i, s ->
+                        itemsIndexed(model.suggestions, key = { _, s -> "s$s" }, contentType = { _, _ -> "suggestion" }) { i, s ->
                             SuggestionRow(Icons.Search, s, onFill = {
                                 model.field = TextFieldValue("$s ", TextRange(s.length + 1))
                             }, modifier = Modifier.floatIn(motion, i)) { go(s) }
                         }
                     }
                 } else when {
-                    model.loading -> items(3) { VideoCardSkeleton() }
+                    model.loading -> items(3, contentType = { "skeleton" }) { VideoCardSkeleton() }
                     model.failed -> item { Message("Search didn't go through", "Check your connection.", "Try again") { model.submit(submitted) } }
                     model.results.isEmpty() -> item { Message("No results", "Try different words.", null) {} }
-                    else -> itemsIndexed(model.results, key = { _, v -> v.id }) { i, v ->
+                    else -> itemsIndexed(model.results, key = { _, v -> v.id }, contentType = { _, _ -> "card" }) { i, v ->
                         VideoCard(
                             v, saved = v.id in savedIds, onOpen = { onPlay(v) }, onToggleSave = { Library.toggleSaved(v) }, onQueue = { onQueue(v) },
                             modifier = Modifier.animateItem().floatIn(motion, i),

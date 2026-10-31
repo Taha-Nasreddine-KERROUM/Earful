@@ -43,7 +43,7 @@ object SponsorBlock {
             .addQueryParameter("actionTypes", """["skip"]""")
             .build()
         val req = okhttp3.Request.Builder().url(url).header("User-Agent", "Earful/1.0 (Android)").build()
-        Network.client.newCall(req).execute().use { res ->
+        Network.text.newCall(req).execute().use { res ->
             if (res.code == 404) return emptyList() // nobody marked anything with this prefix
             if (!res.isSuccessful) error("HTTP ${res.code}")
             val arr = JSONArray(res.body.string())

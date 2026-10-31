@@ -375,7 +375,7 @@ fun QueuePanel(
             userScrollEnabled = !rows.deleting,
             contentPadding = PaddingValues(bottom = navBottom + 16.dp),
         ) {
-            itemsIndexed(entries, key = { _, e -> e.uid }) { i, e ->
+            itemsIndexed(entries, key = { _, e -> e.uid }, contentType = { _, _ -> "row" }) { i, e ->
                 val held = e.uid == dragKey
                 QueueRow(
                     entry = e,

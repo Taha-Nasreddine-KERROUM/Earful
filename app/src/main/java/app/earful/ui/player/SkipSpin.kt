@@ -70,14 +70,24 @@ import kotlin.random.Random
  * when you stop (see [Hole]).
  */
 @Composable
-internal fun SkipButton(forward: Boolean, enabled: Boolean = true, onSkip: () -> Unit) {
+internal fun SkipButton(
+    forward: Boolean,
+    enabled: Boolean = true,
+    /** Skips, and says how many seconds it really could (0: none, at the very start or end). */
+    onSkip: () -> Int,
+) {
     val scope = rememberCoroutineScope()
     val spin = remember { SkipSpin(if (forward) 1f else -1f) }
     val measurer = rememberTextMeasurer(cacheSize = 4)
+    val view = androidx.compose.ui.platform.LocalView.current
     spin.measurer = measurer
     fun tap() {
-        onSkip()
-        spin.tap()
+        // Only what really happened counts: 7 s left means +7 (the arrow turns 42°, the counter
+        // says 7); nothing left means the tap does nothing at all.
+        val got = onSkip()
+        if (got <= 0) return
+        app.earful.ui.components.Haptics.tick(view)
+        spin.tap(got)
         spin.start(scope)
     }
     spin.onTap = ::tap
@@ -90,6 +100,7 @@ internal fun SkipButton(forward: Boolean, enabled: Boolean = true, onSkip: () ->
         CircleButton(
             onClick = ::tap,
             enabled = enabled,
+            haptic = false, // ticks only when it really skipped
             modifier = Modifier.graphicsLayer { alpha = dim },
             size = 72.dp,
             label = if (forward) "Forward 10 seconds" else "Back 10 seconds",
@@ -124,7 +135,8 @@ internal class SkipSpin(override val dir: Float) : HoleSpin {
     private var target = 0f; private var anchor = 0f
     private var tapAt = -10f; private var combo = 0
     private var spinning = false
-    override val total get() = combo * 10
+    /** Seconds really skipped in this run of taps. */
+    override var total = 0; private set
     // losing control (0..1) and how it shows
     var c = 0f; private var cPeak = 0f; private var settling = false
     var phi = 0f; var tilt = 0f; var jx = 0f; var jy = 0f
@@ -148,21 +160,24 @@ internal class SkipSpin(override val dir: Float) : HoleSpin {
     override fun since() = time - tapAt
     fun inHole() = Hole.isActive && Hole.spin === this
 
-    fun tap() {
+    /** A tap that skipped [seconds] (10, or less at the very start or end). */
+    fun tap(seconds: Int) {
         val moving = job?.isActive == true
-        combo = if (moving && since() < 0.9f) combo + 1 else 1
+        val goingOn = moving && since() < 0.9f
+        combo = if (goingOn) combo + 1 else 1
+        total = if (goingOn) total + seconds else seconds
         tapAt = time
         if (!spinning) {
             // it spins only once the head has really come all the way round, on the next tap
             if (dir * anchor >= 360f && dir * pos >= dir * anchor - 10f) spinning = true
             else {
-                target += dir * 60f
+                target += dir * 6f * seconds // 60° for 10 s
                 anchor = if (dir > 0) max(anchor, floor(target / 360f) * 360f) else min(anchor, ceil(target / 360f) * 360f)
             }
         }
         settling = false
         flT = 0f
-        if (combo * 10 >= HOLE && spinning) Hole.onTap(this)
+        if (total >= HOLE && spinning) Hole.onTap(this)
     }
 
     fun start(scope: CoroutineScope) {
@@ -199,11 +214,11 @@ internal class SkipSpin(override val dir: Float) : HoleSpin {
             }
             since > 0.12f -> target = if (dir > 0) max(anchor, target - 80f * dt) else min(anchor, target + 80f * dt)
         }
-        c = if (spinning && combo * 10 >= CHAOS) min(1f, c + dt * 0.9f) else max(0f, c - dt * (if (settling) 0.75f else 2f))
+        c = if (spinning && total >= CHAOS) min(1f, c + dt * 0.9f) else max(0f, c - dt * (if (settling) 0.75f else 2f))
         if (c <= 0.001f) settling = false
         // closing in on +2000 s the phone starts to tremble; at +2000 s the hole opens
-        Hole.preShake(this, if (spinning) smooth(1700f, HOLE.toFloat(), combo * 10f) else 0f)
-        if (spinning && combo * 10 >= HOLE) { if (holeT == 0f) Hole.onBreak(this); holeT += dt } else if (!spinning) holeT = 0f
+        Hole.preShake(this, if (spinning) smooth(1700f, HOLE.toFloat(), total.toFloat()) else 0f)
+        if (spinning && total >= HOLE) { if (holeT == 0f) Hole.onBreak(this); holeT += dt } else if (!spinning) holeT = 0f
 
         // the arrow follows its target on a lively spring
         val n = max(1, ceil(dt / 0.004f).toInt()); val h = dt / n

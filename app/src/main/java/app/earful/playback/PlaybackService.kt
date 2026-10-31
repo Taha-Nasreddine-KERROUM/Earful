@@ -97,7 +97,7 @@ class PlaybackService : MediaSessionService() {
                 /* handleAudioFocus= */ true,
             )
             .setHandleAudioBecomingNoisy(true) // headphones out → pause
-            .setWakeMode(C.WAKE_MODE_NETWORK)  // keeps downloading with the screen off
+            .setWakeMode(C.WAKE_MODE_NETWORK)  // keeps downloading with the screen off (see updateWake)
             .setSeekBackIncrementMs(10_000)
             .setSeekForwardIncrementMs(10_000)
             // Reading from a local file is cheap, so read in big, rare batches: the CPU sleeps longer.
@@ -120,20 +120,26 @@ class PlaybackService : MediaSessionService() {
                 notePassed()
                 updateWindow(); recordListen(); saveSession()
             }
-            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = safely { notePassed(); updateWindow(); saveSession() }
+            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = safely { queueChanged = true; notePassed(); updateWindow(); saveSession() }
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) = safely { recover() }
-            override fun onIsPlayingChanged(isPlaying: Boolean) = safely { saveSession() }
+            override fun onIsPlayingChanged(isPlaying: Boolean) = safely {
+                saveSession()
+                // While playing, note the position every ten seconds (a tiny file write), so even if
+                // Android kills the app you come back within seconds of where you were. Paused:
+                // nothing runs at all.
+                saver?.cancel()
+                saver = if (!isPlaying) null else scope.launch {
+                    while (true) {
+                        delay(10_000)
+                        safely { saveSession(); retries = 0 }
+                    }
+                }
+            }
             override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) = safely { saveSession() }
         })
-        // While playing, note the position every few seconds (a tiny file write), so even if
-        // Android kills the app you come back within a few seconds of where you were.
-        scope.launch {
-            while (true) {
-                delay(5_000)
-                if (exoRef?.isPlaying == true) safely { saveSession(); retries = 0 }
-            }
-        }
         AudioCache.onResolved = ::onResolved
+        // Wi-Fi held at full power only while what's playing (or comes next) still downloads.
+        scope.launch { AudioCache.progress.collect { safely { updateWake() } } }
 
         val back10 = CommandButton.Builder(CommandButton.ICON_SKIP_BACK_10)
             .setDisplayName("Back 10 seconds")
@@ -254,12 +260,22 @@ class PlaybackService : MediaSessionService() {
         .setMediaMetadata(metadataFor(v))
         .build()
 
+    /** The queue changed since it was last written (otherwise only the place in it is). */
+    private var queueChanged = true
+    private var saver: kotlinx.coroutines.Job? = null
+
     /** Queue + current video + position → session.json. An empty player means "closed": forget it. */
     private fun saveSession() {
         val p = exoRef ?: return
         if (p.mediaItemCount == 0) { Session.clear(); return }
         val kept = (0 until p.mediaItemCount).filterNot { p.getMediaItemAt(it).mediaId.startsWith(Video.LIVE) }
         if (kept.isEmpty()) { Session.clear(); return }
+        val cur0 = p.currentMediaItemIndex
+        if (!queueChanged) {
+            val index = kept.indexOf(cur0).takeIf { it >= 0 } ?: kept.count { it < cur0 }.coerceAtMost(kept.size - 1)
+            if (Session.savePlace(index, if (kept.contains(cur0)) p.currentPosition else 0L)) return
+        }
+        queueChanged = false
         val items = kept.map { i ->
             val item = p.getMediaItemAt(i)
             item.mediaMetadata.extras?.let { videoFromExtras(item.mediaId, it) }
@@ -378,8 +394,25 @@ class PlaybackService : MediaSessionService() {
         val queued = (0 until p.mediaItemCount).map { p.getMediaItemAt(it).mediaId }
             .filterNot { it.startsWith(Video.LIVE) || it in gone }.toSet()
         AudioCache.retain(listOfNotNull(cur, next).filterNot { it.startsWith(Video.LIVE) }, queued)
+        updateWake()
         next?.takeUnless { it.startsWith(Video.LIVE) }?.let { loadAds(it) }
         scheduleAds()
+    }
+
+    /**
+     * Wi-Fi at full power (a Wi-Fi lock) only while there's downloading to do: what's playing or
+     * what comes next isn't on the phone yet, or it's a live broadcast. A finished file plays with
+     * the CPU alone, and the radio is free to doze between your phone's other traffic.
+     */
+    private var wakeMode = C.WAKE_MODE_NETWORK
+    private fun updateWake() {
+        val exo = exoRef ?: return
+        val cur = exo.currentMediaItem?.mediaId ?: return
+        val next = if (exo.hasNextMediaItem()) exo.getMediaItemAt(exo.nextMediaItemIndex).mediaId else null
+        val loading = cur.startsWith(Video.LIVE) ||
+            listOfNotNull(cur, next).any { !it.startsWith(Video.LIVE) && AudioCache.get(it)?.complete != true }
+        val mode = if (loading) C.WAKE_MODE_NETWORK else C.WAKE_MODE_LOCAL
+        if (mode != wakeMode) { wakeMode = mode; exo.setWakeMode(mode) }
     }
 
     // ---- sponsor skipping ----------------------------------------------------------------------

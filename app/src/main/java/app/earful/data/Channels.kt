@@ -5,9 +5,8 @@ import com.grack.nanojson.JsonObject
 import com.grack.nanojson.JsonWriter
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.Page
 import org.schabi.newpipe.extractor.ServiceList
@@ -28,33 +27,37 @@ import java.nio.charset.StandardCharsets
  * Each sighting is trusted for 20 minutes; opening the channel checks properly.
  */
 object LiveNow {
-    private class Seen(val video: Video, val at: Long)
-    private val _map = MutableStateFlow<Map<String, Seen>>(emptyMap())
+    private class Seen(val video: Video, @Volatile var at: Long)
+    /** Snapshot state: a logo reading it redraws by itself when its channel goes live or ends. */
+    private var map by androidx.compose.runtime.mutableStateOf<Map<String, Seen>>(emptyMap())
     private const val FRESH_MS = 20 * 60_000L
-
-    /** Bumped whenever the set changes, for the screen to redraw. */
-    private val _version = MutableStateFlow(0)
-    val version: StateFlow<Int> = _version.asStateFlow()
 
     fun key(channelUrl: String) = channelUrl.trimEnd('/').substringAfterLast('/').lowercase()
 
     internal fun seen(live: Video) {
         val url = live.channelUrl ?: return
-        _map.value = _map.value + (key(url) to Seen(live, System.currentTimeMillis()))
-        _version.value++
+        val k = key(url)
+        val now = System.currentTimeMillis()
+        synchronized(this) {
+            val had = map[k]
+            // the same broadcast seen again: just trust it longer (nothing on screen changes)
+            if (had != null && had.video.id == live.id && now - had.at < FRESH_MS) { had.at = now; return }
+            map = map + (k to Seen(live, now))
+        }
     }
 
     internal fun ended(channelUrl: String) {
         val k = key(channelUrl)
-        if (k !in _map.value) return
-        _map.value = _map.value - k
-        _version.value++
+        synchronized(this) {
+            if (k !in map) return
+            map = map - k
+        }
     }
 
     /** The broadcast [channelUrl] is live with, if it's (recently known to be) live. */
     fun of(channelUrl: String?): Video? {
         channelUrl ?: return null
-        val s = _map.value[key(channelUrl)] ?: return null
+        val s = map[key(channelUrl)] ?: return null
         return s.video.takeIf { System.currentTimeMillis() - s.at < FRESH_MS }
     }
 }

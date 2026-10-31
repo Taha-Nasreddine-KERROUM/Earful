@@ -101,6 +101,8 @@ dependencies {
 
     // Networking + images
     implementation("com.squareup.okhttp3:okhttp:5.5.1")
+    // YouTube's answers come Brotli-packed when asked: about a fifth less data than gzip.
+    implementation("com.squareup.okhttp3:okhttp-brotli:5.5.1")
     implementation("io.coil-kt.coil3:coil-compose:3.6.3")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.6.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")

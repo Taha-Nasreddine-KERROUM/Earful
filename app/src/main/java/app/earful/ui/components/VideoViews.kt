@@ -135,7 +135,8 @@ fun VideoRow(video: Video, saved: Boolean, onOpen: () -> Unit, onToggleSave: () 
 fun DurationBadge(sec: Long, modifier: Modifier = Modifier) {
     if (sec <= 0) return
     Box(
-        modifier.clip(RoundedCornerShape(6.dp)).background(Color(0xB3000000)).padding(horizontal = 6.dp, vertical = 2.dp)
+        // (a shaped fill, not a clip: no extra layer per card)
+        modifier.background(Color(0xB3000000), RoundedCornerShape(6.dp)).padding(horizontal = 6.dp, vertical = 2.dp)
     ) {
         Text(Format.duration(sec), Type.captionStrong.copy(fontFeatureSettings = "tnum"), color = Color.White)
     }

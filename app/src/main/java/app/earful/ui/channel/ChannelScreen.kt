@@ -217,14 +217,14 @@ fun ChannelScreen(
                 modifier = Modifier.fillMaxSize(),
             ) {
                 when {
-                    l.loading && l.items.isEmpty() -> items(3) { VideoCardSkeleton() }
+                    l.loading && l.items.isEmpty() -> items(3, contentType = { "skeleton" }) { VideoCardSkeleton() }
                     l.failed && l.items.isEmpty() -> item {
                         Message("Couldn't load this channel", "Check your connection.", "Try again") {
                             if (model.info == null) model.start(pageSort) else model.load(pageSort)
                         }
                     }
                     l.items.isEmpty() && !l.loading -> item { Message("No videos", "This channel hasn't posted any yet.", null) {} }
-                    else -> itemsIndexed(l.items, key = { _, v -> v.id }) { _, v ->
+                    else -> itemsIndexed(l.items, key = { _, v -> v.id }, contentType = { _, _ -> "card" }) { _, v ->
                         VideoCard(
                             v, saved = v.id in savedIds, onOpen = { onPlay(v) },
                             onToggleSave = { Library.toggleSaved(v) }, onQueue = { onQueue(v) },

@@ -56,7 +56,7 @@ fun SavedScreen(bottomPadding: Dp, onPlay: (Video) -> Unit, onQueue: (Video) -> 
             }
         }
         if (saved.isEmpty()) item { Empty() }
-        items(saved, key = { it.id }) { v ->
+        items(saved, key = { it.id }, contentType = { "card" }) { v ->
             // Swipe left to remove it: the red floods in and drains away, like in Up next.
             SwipeToDrain(
                 onRemove = { Library.removeSaved(v.id); onRemoved(v) },

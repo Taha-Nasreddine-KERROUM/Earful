@@ -79,11 +79,10 @@ private class Burst(val zone: Zone, val total: Int, val at: Offset, val id: Int)
 fun ArtworkGestures(
     enabled: Boolean,
     playing: Boolean,
-    onSeek: (seconds: Int) -> Unit,
+    /** Skips up to that many seconds; says how many it really could (0: none, at the start or end). */
+    onSeek: (seconds: Int) -> Int,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
-    /** Whether a skip of that many seconds is possible right now (live: only what's really there). */
-    canSeek: (seconds: Int) -> Boolean = { true },
     showHint: Boolean = false,
     onHintShown: () -> Unit = {},
 ) {
@@ -95,16 +94,19 @@ fun ArtworkGestures(
     var streakTime by remember { mutableStateOf(0L) }
 
     fun fire(zone: Zone, at: Offset, now: Long) {
-        if (zone != Zone.Center && !canSeek(zone.seconds)) { streakZone = null; return } // nothing there to skip to
-        Haptics.tick(view)
         if (zone == Zone.Center) {
+            Haptics.tick(view)
             onToggle(); toggleId++; streakZone = null; return
         }
-        onSeek(zone.seconds)
+        // Only what really happened: 7 s left means +7; nothing left (the very start or end)
+        // means the tap does nothing at all: no tick, no ripple, no count.
+        val got = onSeek(zone.seconds)
+        if (got == 0) return
+        Haptics.tick(view)
         val prev = burst
         val sameSide = prev != null && streakZone != null && now - streakTime < 900 &&
             ((prev.zone.isLeft && zone.isLeft) || (prev.zone.isRight && zone.isRight))
-        burst = Burst(zone, if (sameSide) prev!!.total + zone.seconds else zone.seconds, at, ++nextId)
+        burst = Burst(zone, if (sameSide) prev!!.total + got else got, at, ++nextId)
         streakZone = zone; streakTime = now
     }
 

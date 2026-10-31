@@ -65,18 +65,108 @@ object YouTube {
         }
     }
 
-    suspend fun suggestions(query: String): List<String> = io {
-        runCatching { service.suggestionExtractor.suggestionList(query) }.getOrDefault(emptyList())
-            .take(8)
+    suspend fun suggestions(query: String): List<String> {
+        val key = query.trim().lowercase(Locale.ROOT)
+        synchronized(suggested) { suggested[key] }?.let { return it }
+        return io {
+            runCatching { service.suggestionExtractor.suggestionList(query).take(8) }
+                .onSuccess { synchronized(suggested) { suggested[key] = it } }
+                .getOrDefault(emptyList())
+        }
     }
+
+    /** The last few dozen suggestion lists, so typing back and forth asks YouTube nothing twice. */
+    private val suggested = lru<String, List<String>>(64)
 
     // ---- "For you" ----------------------------------------------------------------------
 
-    /** Videos YouTube itself suggests next to [videoId] (Shorts and live already removed). */
-    suspend fun related(videoId: String): List<Video> = io {
-        val ex = service.getStreamExtractor("https://www.youtube.com/watch?v=$videoId")
-        ex.fetchPage()
-        ex.relatedItems?.items.orEmpty().toVideos()
+    /**
+     * Videos YouTube itself suggests next to [videoId] (Shorts and live already removed).
+     * One light request (the page's "watch next" part only, not the video itself), and nothing at
+     * all if it's been asked within [maxAgeMs] (playing a video already brings its suggestions).
+     */
+    suspend fun related(videoId: String, maxAgeMs: Long = 30 * 60_000L): List<Video> {
+        synchronized(relatedKept) { relatedKept[videoId] }
+            ?.takeIf { System.currentTimeMillis() - it.second < maxAgeMs }?.let { return it.first }
+        return io {
+            val light = runCatching { watchNext(videoId).related }.getOrNull().orEmpty()
+            light.ifEmpty {
+                val ex = service.getStreamExtractor("https://www.youtube.com/watch?v=$videoId")
+                ex.fetchPage()
+                ex.relatedItems?.items.orEmpty().toVideos().also { keepRelated(videoId, it) }
+            }
+        }
+    }
+
+    private val relatedKept = lru<String, Pair<List<Video>, Long>>(24)
+    private fun keepRelated(videoId: String, list: List<Video>) {
+        if (list.isNotEmpty()) synchronized(relatedKept) { relatedKept[videoId] = list to System.currentTimeMillis() }
+    }
+
+    /** What the page's "watch next" part says about a video: its channels and what to play after. */
+    private class WatchNext(val related: List<Video>, val owners: List<Collab>?)
+
+    /**
+     * Asks only for the "watch next" part of a video's page (no streams, no player): about a third
+     * of the data and requests of opening the video properly. Everything in it is kept.
+     */
+    private fun watchNext(videoId: String): WatchNext {
+        val loc = NewPipe.getPreferredLocalization()
+        val body = com.grack.nanojson.JsonWriter.string(
+            org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper
+                .prepareDesktopJsonBuilder(loc, NewPipe.getPreferredContentCountry())
+                .value("videoId", videoId).value("contentCheckOk", true).value("racyCheckOk", true)
+                .done()
+        ).toByteArray(Charsets.UTF_8)
+        val next = org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper.getJsonPostResponse("next", body, loc)
+
+        val parser = runCatching { service.getTimeAgoParser(loc) }.getOrNull()
+        val collector = org.schabi.newpipe.extractor.stream.StreamInfoItemsCollector(service.serviceId)
+        next.getObject("contents").getObject("twoColumnWatchNextResults").getObject("secondaryResults")
+            .getObject("secondaryResults").getArray("results").forEach { r ->
+                val o = r as? com.grack.nanojson.JsonObject ?: return@forEach
+                runCatching {
+                    when {
+                        o.has("compactVideoRenderer") -> collector.commit(
+                            org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamInfoItemExtractor(o.getObject("compactVideoRenderer"), parser))
+                        o.has("lockupViewModel") -> o.getObject("lockupViewModel").takeIf { it.getString("contentType") == "LOCKUP_CONTENT_TYPE_VIDEO" }?.let {
+                            collector.commit(org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamInfoItemLockupExtractor(it, parser))
+                        }
+                    }
+                }
+            }
+        val related = collector.items.toVideos()
+        keepRelated(videoId, related)
+
+        val owners = collaboratorsIn(next) ?: ownerOf(next)?.let { o ->
+            val name = o.getObject("title").getArray("runs").firstOrNull()?.let { (it as? com.grack.nanojson.JsonObject)?.getString("text") }
+                ?: o.getObject("title").getString("simpleText")
+            val id = o.getObject("navigationEndpoint").getObject("browseEndpoint").getString("browseId")?.takeIf { it.startsWith("UC") }
+            if (name.isNullOrBlank() || id == null) null
+            else listOf(Collab(name, "https://www.youtube.com/channel/$id", pictureIn(o.getObject("thumbnail").getArray("thumbnails"))))
+        }
+        if (owners != null && owners.all { it.avatar != null }) collabs[videoId] = owners
+        return WatchNext(related, owners)
+    }
+
+    /** The main video's owner line, where YouTube says who made it. */
+    private fun ownerOf(next: com.grack.nanojson.JsonObject): com.grack.nanojson.JsonObject? =
+        next.getObject("contents").getObject("twoColumnWatchNextResults").getObject("results")
+            .getObject("results").getArray("contents")
+            .firstNotNullOfOrNull { c ->
+                (c as? com.grack.nanojson.JsonObject)?.getObject("videoSecondaryInfoRenderer")
+                    ?.getObject("owner")?.getObject("videoOwnerRenderer")?.takeIf { it.isNotEmpty() }
+            } ?: findObject(next, "videoOwnerRenderer")
+
+    /** A round channel picture of about the size a logo shows (YouTube offers a few sizes). */
+    private fun pictureIn(list: com.grack.nanojson.JsonArray?): String? = list
+        ?.mapNotNull { src -> (src as? com.grack.nanojson.JsonObject)?.let { o -> o.getString("url")?.let { u -> u to o.getInt("width", 0) } } }
+        ?.let { all -> all.filter { it.second in 1..176 }.maxByOrNull { it.second } ?: all.lastOrNull() }
+        ?.first?.let(::fullUrl)
+
+    /** A few dozen most recent answers, the oldest dropped first. */
+    private fun <K, V> lru(max: Int) = object : LinkedHashMap<K, V>(max, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?) = size > max
     }
 
     // ---- playback -------------------------------------------------------------------------
@@ -109,7 +199,7 @@ object YouTube {
             channelUrl = info.uploaderUrl?.takeIf { it.isNotBlank() } ?: fallback?.channelUrl,
         )
         val length = audio.itagItem?.contentLength?.takeIf { it > 0 }
-            ?: Regex("[?&]clen=(\\d+)").find(audio.content)?.groupValues?.get(1)?.toLong()
+            ?: CLEN.find(audio.content)?.groupValues?.get(1)?.toLong()
             ?: -1L
         ResolvedAudio(
             video = video,
@@ -118,7 +208,7 @@ object YouTube {
             mime = if (audio.format == MediaFormat.WEBMA_OPUS || audio.format == MediaFormat.WEBMA)
                 "audio/webm" else "audio/mp4",
             bitrateKbps = kbps(audio),
-            related = info.relatedItems.toVideos(),
+            related = info.relatedItems.toVideos().also { keepRelated(videoId, it) },
         )
     }
 
@@ -169,9 +259,11 @@ object YouTube {
 
     /** The channels [videoId] is by (one, or several when they made it together). */
     suspend fun collaborators(videoId: String): List<Collab> = collabs[videoId] ?: io {
-        val ex = service.getStreamExtractor("https://www.youtube.com/watch?v=$videoId")
-        ex.fetchPage()
-        val list = collaborators(ex) ?: listOf(Collab(ex.uploaderName.orEmpty(), ex.uploaderUrl, Video.bestImage(runCatching { ex.uploaderAvatars }.getOrNull(), 96)))
+        val list = runCatching { watchNext(videoId).owners }.getOrNull() ?: run {
+            val ex = service.getStreamExtractor("https://www.youtube.com/watch?v=$videoId")
+            ex.fetchPage()
+            collaborators(ex) ?: listOf(Collab(ex.uploaderName.orEmpty(), ex.uploaderUrl, Video.bestImage(runCatching { ex.uploaderAvatars }.getOrNull(), 96)))
+        }
         val done = withPictures(list)
         collabs[videoId] = done
         done
@@ -197,8 +289,11 @@ object YouTube {
      */
     private fun collaborators(ex: org.schabi.newpipe.extractor.stream.StreamExtractor): List<Collab>? = runCatching {
         val f = ex.javaClass.getDeclaredField("nextResponse").apply { isAccessible = true }
-        val next = f.get(ex) as? com.grack.nanojson.JsonObject ?: return@runCatching null
-        val owner = findObject(next, "videoOwnerRenderer") ?: return@runCatching null
+        (f.get(ex) as? com.grack.nanojson.JsonObject)?.let(::collaboratorsIn)
+    }.getOrNull()
+
+    private fun collaboratorsIn(next: com.grack.nanojson.JsonObject): List<Collab>? = runCatching {
+        val owner = ownerOf(next) ?: return@runCatching null
         val items = owner.getObject("navigationEndpoint").getObject("showDialogCommand")
             .getObject("panelLoadingStrategy").getObject("inlineContent").getObject("dialogViewModel")
             .getObject("customContent").getObject("listViewModel").getArray("listItems")
@@ -209,10 +304,7 @@ object YouTube {
             val id = findString(item, "browseId")?.takeIf { it.startsWith("UC") }
             // the channel's round picture (not the little verified badge, which also has "sources")
             val avatarBox = findObject(item, "avatarViewModel") ?: item.getObject("leadingAccessory")
-            val avatar = (findArray(avatarBox, "sources") ?: findArray(item, "thumbnails"))
-                ?.mapNotNull { src -> (src as? com.grack.nanojson.JsonObject)?.let { o -> o.getString("url")?.let { u -> u to o.getInt("width", 0) } } }
-                ?.let { all -> all.filter { it.second in 1..176 }.maxByOrNull { it.second } ?: all.lastOrNull() }
-                ?.first?.let(::fullUrl)
+            val avatar = pictureIn(findArray(avatarBox, "sources") ?: findArray(item, "thumbnails"))
             Collab(name, id?.let { "https://www.youtube.com/channel/$it" }, avatar)
         }.distinctBy { it.name }.takeIf { it.size > 1 }
     }.getOrNull()
@@ -262,8 +354,9 @@ object YouTube {
 
     /** "A and B", "A, B and C" — the way YouTube writes several channels. */
     /** Does this channel line name several channels ("A and B", "A & B", "A، B"…)? */
-    fun looksShared(channel: String): Boolean =
-        Regex("""\s(and|&|et|y|und|e|و|и|ve|と|和)\s|،|, """, RegexOption.IGNORE_CASE).containsMatchIn(channel)
+    fun looksShared(channel: String): Boolean = SHARED.containsMatchIn(channel)
+    private val SHARED = Regex("""\s(and|&|et|y|und|e|و|и|ve|と|和)\s|،|, """, RegexOption.IGNORE_CASE)
+    private val CLEN = Regex("[?&]clen=(\\d+)")
 
     internal fun names(list: List<String>): String =
         if (list.size <= 1) list.firstOrNull().orEmpty() else list.dropLast(1).joinToString(", ") + " and " + list.last()
@@ -285,11 +378,12 @@ object YouTube {
 
     /** The channel a video is from, for videos that don't know it (saved by an older version). */
     suspend fun channelUrlOf(videoId: String): String? = io {
-        runCatching {
-            val ex = service.getStreamExtractor("https://www.youtube.com/watch?v=$videoId")
-            ex.fetchPage()
-            ex.uploaderUrl
-        }.getOrNull()?.takeIf { it.isNotBlank() }
+        (collabs[videoId] ?: runCatching { watchNext(videoId).owners }.getOrNull())?.firstOrNull()?.url
+            ?: runCatching {
+                val ex = service.getStreamExtractor("https://www.youtube.com/watch?v=$videoId")
+                ex.fetchPage()
+                ex.uploaderUrl
+            }.getOrNull()?.takeIf { it.isNotBlank() }
     }
 
     internal suspend fun <T> io(block: suspend () -> T): T = withContext(Dispatchers.IO) { block() }

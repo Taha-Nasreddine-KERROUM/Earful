@@ -45,6 +45,9 @@ import app.earful.ui.components.Text
 import app.earful.ui.theme.Motion
 import app.earful.ui.theme.Type
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.mutableFloatStateOf
 import kotlinx.coroutines.launch
 
 /**
@@ -55,37 +58,44 @@ import kotlinx.coroutines.launch
  */
 @Composable
 fun Scrubber(
-    positionMs: Long,
+    /** Where playback is (ms), read only while drawing: the bar moving never rebuilds the screen. */
+    position: () -> Long,
     durationMs: Long,
     downloaded: Float,
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
     ads: List<app.earful.data.AdSegment> = emptyList(),
-    /** Follow [positionMs] exactly, frame by frame (it's being animated by someone else). */
+    /** Follow [position] exactly, frame by frame (it's being animated by someone else). */
     follow: Boolean = false,
 ) {
     val view = LocalView.current
     val scope = rememberCoroutineScope()
     var dragging by remember { mutableStateOf(false) }
-    var dragFraction by remember { mutableStateOf(0f) }
+    var dragFraction by remember { mutableFloatStateOf(0f) }
     var held by remember { mutableStateOf<Float?>(null) } // shown until the player catches up
 
     val dur = durationMs.coerceAtLeast(1)
-    val live = (positionMs.toFloat() / dur).coerceIn(0f, 1f)
-    val target = when {
-        dragging -> dragFraction
-        held != null -> held!!
-        else -> live
-    }
+    val durNow by androidx.compose.runtime.rememberUpdatedState(dur)
+    val followNow by androidx.compose.runtime.rememberUpdatedState(follow)
     LaunchedEffect(held) { if (held != null) { delay(700); held = null } }
     // Jumps (a tap, ±10 s, a skipped sponsor) glide the bar to its new place so your eye can follow
     // where you went; normal playback and dragging stay 1:1 (no animation, no extra frames).
-    val shown = remember { androidx.compose.animation.core.Animatable(target) }
-    LaunchedEffect(target, dragging) {
-        if (!dragging && !follow && kotlin.math.abs(target - shown.value) > 0.015f) shown.animateTo(target, Motion.sheet())
-        else shown.snapTo(target)
+    // All of it happens below the screen's composition: only the bar is redrawn.
+    val shown = remember { androidx.compose.animation.core.Animatable((position().toFloat() / dur).coerceIn(0f, 1f)) }
+    LaunchedEffect(Unit) {
+        snapshotFlow {
+            when {
+                dragging -> dragFraction
+                held != null -> held!!
+                else -> (position().toFloat() / durNow).coerceIn(0f, 1f)
+            }
+        }.collectLatest { target ->
+            if (!dragging && !followNow && kotlin.math.abs(target - shown.value) > 0.015f) shown.animateTo(target, Motion.sheet())
+            else shown.snapTo(target)
+        }
     }
-    val fraction = shown.value
+    // the times under the bar change once a second, not on every frame
+    val shownSec by remember { androidx.compose.runtime.derivedStateOf { (shown.value * durNow / 1000).toLong() } }
 
     // How much the bead of water under your finger swells (dp): up while held, wobbling flat after.
     val swell = remember { androidx.compose.animation.core.Animatable(0f) }
@@ -102,7 +112,7 @@ fun Scrubber(
                 .height(32.dp) // generous hit area around a thin bar (Fitts)
                 .semantics {
                     contentDescription = "Playback position"
-                    progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
+                    progressBarRangeInfo = ProgressBarRangeInfo(shown.value, 0f..1f)
                     setProgress { onSeek((it * dur).toLong()); true }
                 }
                 .pointerInput(dur) {
@@ -138,7 +148,7 @@ fun Scrubber(
                 val base = 6.dp.toPx()
                 val bulge = swell.value.dp.toPx()
                 val sigma = 18.dp.toPx()
-                val px = size.width * fraction
+                val px = size.width * shown.value
                 val thin = 1.5.dp.toPx()
                 // Thickness along the bar: the bead of water is the bar itself swelling around the
                 // playhead (no separate knob, so nothing to stick out or leave a gap).
@@ -185,22 +195,23 @@ fun Scrubber(
                 }
             }
         }
-        val shownMs = (fraction * dur).toLong()
-        Row(Modifier.fillMaxWidth().offset(y = timeShift).padding(top = 2.dp)) {
+        Row(Modifier.fillMaxWidth().offset { androidx.compose.ui.unit.IntOffset(0, timeShift.roundToPx()) }.padding(top = 2.dp)) {
             val style = Type.caption.copy(fontFeatureSettings = "tnum")
             val c = Color.White.copy(alpha = if (dragging) 0.9f else 0.55f)
-            Text(Format.duration(shownMs / 1000), style, color = c)
+            val sec = shownSec
+            Text(Format.duration(sec), style, color = c)
             Spacer(Modifier.weight(1f))
-            Text("−" + Format.duration(((dur - shownMs).coerceAtLeast(0)) / 1000), style, color = c)
+            Text("−" + Format.duration(((dur / 1000) - sec).coerceAtLeast(0)), style, color = c)
         }
     }
 }
 
 /** Mini player's bar: just a hairline that shows where you are. Not interactive by design. */
 @Composable
-fun MiniProgress(fraction: Float, color: Color, modifier: Modifier = Modifier) {
+fun MiniProgress(fraction: () -> Float, color: Color, modifier: Modifier = Modifier) {
+    // (read while drawing: the mini player itself isn't rebuilt as the time goes by)
     Canvas(modifier.height(2.dp).graphicsLayer { }) {
         drawRect(color.copy(alpha = 0.15f))
-        drawRect(color, size = Size(size.width * fraction.coerceIn(0f, 1f), size.height))
+        drawRect(color, size = Size(size.width * fraction().coerceIn(0f, 1f), size.height))
     }
 }

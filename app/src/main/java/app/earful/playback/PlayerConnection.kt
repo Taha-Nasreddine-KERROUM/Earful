@@ -183,20 +183,43 @@ class PlayerConnection(private val context: Context) {
         c.play()
     }
 
-    /** Live: is there [deltaMs] to skip (back into what's kept, or forward towards now)? */
-    fun liveRoom(deltaMs: Long): Boolean {
-        val c = controller ?: return false
-        val dur = c.duration.takeIf { it > 0 } ?: return false
-        return if (deltaMs > 0) dur - c.currentPosition - app.earful.ui.player.LIVE_MARGIN_MS >= deltaMs
-        else c.currentPosition >= -deltaMs
+    /** Screenshots of the player with no real one behind it: what a skip would get. */
+    @androidx.annotation.VisibleForTesting
+    internal var skipStandIn: ((Long) -> Int)? = null
+
+    /**
+     * Skips by up to [deltaMs], never past the start or the end (live: never past "now", less a
+     * few seconds that aren't there yet). Returns the seconds it really skipped, with their sign:
+     * −7 for −10 at 0:07, and 0 when there was nothing to skip (the very start or end), in which
+     * case nothing happens at all.
+     */
+    fun skip(deltaMs: Long): Int {
+        skipStandIn?.let { return it(deltaMs) }
+        val c = controller ?: return 0
+        val pos = c.currentPosition.coerceAtLeast(0)
+        val known = c.duration.takeIf { it > 0 } ?: c.mediaMetadata.durationMs?.takeIf { it > 0 }
+        val live = c.isCurrentMediaItemLive
+        if (live && known == null) return 0
+        val end = if (live) known!! - app.earful.ui.player.LIVE_MARGIN_MS else known ?: Long.MAX_VALUE
+        // forward: no further than the end (never backwards, even if already past it);
+        // back: no further than the start
+        val target = if (deltaMs > 0) minOf(pos + deltaMs, maxOf(end, pos)) else maxOf(pos + deltaMs, 0L)
+        val got = target - pos
+        if (kotlin.math.abs(got) < 500) return 0
+        c.seekTo(target)
+        if (deltaMs < 0 && c.playbackState == Player.STATE_ENDED) c.play()
+        val secs = Math.round(kotlin.math.abs(got) / 1000.0).toInt().coerceAtLeast(1)
+        return if (got < 0) -secs else secs
     }
 
-    fun seekBy(deltaMs: Long) = withController { c ->
-        val live = c.isCurrentMediaItemLive
-        if (live && !liveRoom(deltaMs)) return@withController
-        val dur = c.duration.takeIf { it > 0 } ?: Long.MAX_VALUE
-        c.seekTo((c.currentPosition + deltaMs).coerceIn(0, dur))
-        if (deltaMs < 0 && c.playbackState == Player.STATE_ENDED) c.play()
+    /** How much there is to skip back or forward from [positionMs] (ms), counted like [skip]. */
+    fun room(forward: Boolean, positionMs: Long, durationMs: Long, live: Boolean): Long {
+        val pos = positionMs.coerceAtLeast(0)
+        return when {
+            !forward -> pos
+            durationMs <= 0 -> if (live) 0 else Long.MAX_VALUE
+            else -> (durationMs - pos - if (live) app.earful.ui.player.LIVE_MARGIN_MS else 0L).coerceAtLeast(0)
+        }
     }
 
     fun seekTo(ms: Long) = withController { c -> c.seekTo(ms.coerceAtLeast(0)) }

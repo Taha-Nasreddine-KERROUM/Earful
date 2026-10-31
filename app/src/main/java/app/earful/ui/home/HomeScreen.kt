@@ -75,6 +75,11 @@ import app.earful.ui.components.pressable
 import app.earful.ui.components.blockTouches
 import app.earful.ui.theme.LocalPalette
 import app.earful.ui.theme.Type
+import kotlin.math.roundToInt
+import androidx.compose.ui.layout.layout
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 
 /**
  * Home is one thing only: "For you" — videos related to what you've listened to.
@@ -196,13 +201,20 @@ fun HomeScreen(
         }
 
         // ----- refresh spinner, revealed in the gap the pull opens -------------------------------
-        if (pull > 0.5f) {
+        // (the pull is followed in layout and drawing only: the screen isn't rebuilt every frame)
+        val pulled by remember { derivedStateOf { pull > 0.5f } }
+        if (pulled) {
             Box(
-                Modifier.fillMaxWidth().padding(top = barHeight).height(with(density) { pull.toDp() }),
+                Modifier.fillMaxWidth().padding(top = barHeight)
+                    .layout { m, c ->
+                        val h = pull.roundToInt().coerceIn(c.minHeight, c.maxHeight)
+                        val placeable = m.measure(c.copy(minHeight = h, maxHeight = h))
+                        layout(placeable.width, h) { placeable.place(0, 0) }
+                    },
                 contentAlignment = Alignment.Center,
             ) {
                 ActivitySpinner(
-                    progress = (pull / trigger).coerceIn(0f, 1f),
+                    progress = { (pull / trigger).coerceIn(0f, 1f) },
                     spinning = model.refreshing,
                     color = p.secondary,
                 )
@@ -258,18 +270,20 @@ fun HomeScreen(
  * (so the pull itself shows progress); once refreshing, the bright spoke circles round.
  */
 @Composable
-private fun ActivitySpinner(progress: Float, spinning: Boolean, color: Color) {
-    val step = if (spinning) {
+private fun ActivitySpinner(progress: () -> Float, spinning: Boolean, color: Color) {
+    // the bright spoke moves on eight times a turn: the spokes are redrawn only then
+    val step: State<Int> = if (spinning) {
         val t = rememberInfiniteTransition(label = "spin")
-        val v by t.animateFloat(0f, 8f, infiniteRepeatable(tween(800, easing = LinearEasing)), label = "step")
-        v.toInt()
-    } else 0
+        val v = t.animateFloat(0f, 8f, infiniteRepeatable(tween(800, easing = LinearEasing)), label = "step")
+        remember(v) { derivedStateOf { v.value.toInt() } }
+    } else remember { mutableIntStateOf(0) }
     Canvas(Modifier.size(26.dp)) {
+        val step = step.value
         val c = center
         val outer = size.minDimension / 2
         val inner = outer * 0.48f
         val w = size.minDimension * 0.105f
-        val shown = if (spinning) 8 else (progress * 8).toInt().coerceIn(0, 8)
+        val shown = if (spinning) 8 else (progress() * 8).toInt().coerceIn(0, 8)
         for (i in 0 until shown) {
             val angle = Math.toRadians((i * 45.0) - 90.0)
             val age = ((step - i) % 8 + 8) % 8

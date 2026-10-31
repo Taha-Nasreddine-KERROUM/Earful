@@ -28,7 +28,20 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import app.earful.ui.theme.LocalPalette
 import app.earful.ui.theme.Motion
-import androidx.compose.ui.composed
+import androidx.compose.animation.core.Animatable
+import androidx.compose.foundation.IndicationNodeFactory
+import androidx.compose.foundation.interaction.InteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Paint
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.drawscope.ContentDrawScope
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.drawscope.scale
+import androidx.compose.ui.node.DelegatableNode
+import androidx.compose.ui.node.DrawModifierNode
+import kotlinx.coroutines.launch
 
 /** Text with Apple's defaults: label colour, ellipsis, no font padding. */
 @Composable
@@ -51,6 +64,9 @@ fun Text(
 /**
  * Apple-style press feedback: the element dims and settles slightly into the screen.
  * No ripple — the response is on the object you touched, not painted over it.
+ *
+ * Costs nothing until it's first pressed: no layer, no animation, nothing composed per item
+ * (a feed has five of these on every card). The look is made the moment a finger lands.
  */
 fun Modifier.pressable(
     enabled: Boolean = true,
@@ -58,14 +74,58 @@ fun Modifier.pressable(
     role: Role = Role.Button,
     label: String? = null,
     onClick: () -> Unit,
-): Modifier = composed {
-    val source = remember { MutableInteractionSource() }
-    val pressed by source.collectIsPressedAsState()
-    val s by animateFloatAsState(if (pressed) scaleTo else 1f, Motion.snappy(), label = "press")
-    val a by animateFloatAsState(if (pressed) 0.6f else 1f, Motion.snappy(), label = "pressAlpha")
-    this
-        .graphicsLayer { scaleX = s; scaleY = s; alpha = a }
-        .clickable(source, indication = null, enabled = enabled, role = role, onClickLabel = label, onClick = onClick)
+): Modifier = clickable(
+    interactionSource = null,
+    indication = PressSink.of(scaleTo),
+    enabled = enabled,
+    onClickLabel = label,
+    role = role,
+    onClick = onClick,
+)
+
+/** The press look, as a light drawing step that only exists once something is pressed. */
+private class PressSink private constructor(private val scaleTo: Float) : IndicationNodeFactory {
+    override fun create(interactionSource: InteractionSource): DelegatableNode = PressSinkNode(interactionSource, scaleTo)
+    override fun equals(other: Any?) = other is PressSink && other.scaleTo == scaleTo
+    override fun hashCode() = scaleTo.hashCode()
+
+    companion object {
+        private val made = HashMap<Float, PressSink>()
+        fun of(scaleTo: Float): PressSink = synchronized(made) { made.getOrPut(scaleTo) { PressSink(scaleTo) } }
+    }
+}
+
+private class PressSinkNode(private val source: InteractionSource, private val scaleTo: Float) :
+    Modifier.Node(), DrawModifierNode {
+    private val press = Animatable(0f)
+    private val paint = Paint()
+
+    override fun onAttach() {
+        coroutineScope.launch {
+            var held = 0
+            source.interactions.collect { i ->
+                when (i) {
+                    is PressInteraction.Press -> held++
+                    is PressInteraction.Release, is PressInteraction.Cancel -> held = (held - 1).coerceAtLeast(0)
+                    else -> return@collect
+                }
+                val to = if (held > 0) 1f else 0f
+                launch { press.animateTo(to, Motion.snappy()) }
+            }
+        }
+    }
+
+    override fun ContentDrawScope.draw() {
+        val p = press.value
+        if (p <= 0.001f) { drawContent(); return }
+        val s = 1f - (1f - scaleTo) * p
+        paint.alpha = 1f - 0.4f * p
+        scale(s) {
+            drawIntoCanvas { it.saveLayer(Rect(Offset.Zero, size), paint) }
+            this@draw.drawContent()
+            drawIntoCanvas { it.restore() }
+        }
+    }
 }
 
 /** Placeholder block that breathes gently while content loads (perceived wait drops vs. a spinner). */
@@ -73,7 +133,8 @@ fun Modifier.pressable(
 fun Skeleton(modifier: Modifier, shape: Shape) {
     val t = rememberInfiniteTransition(label = "skeleton")
     val a by t.animateFloat(0.55f, 1f, infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "a")
-    Box(modifier.graphicsLayer { alpha = a }.clip(shape).background(LocalPalette.current.fill))
+    // (one flat shape: faded straight, without painting it off to the side first)
+    Box(modifier.graphicsLayer { alpha = a; compositingStrategy = CompositingStrategy.ModulateAlpha }.clip(shape).background(LocalPalette.current.fill))
 }
 
 object Haptics {
