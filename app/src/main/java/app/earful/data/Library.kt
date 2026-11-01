@@ -77,10 +77,19 @@ object Library {
     /** Most recently listened video ids, newest first. */
     fun recentListened(n: Int): List<String> = synchronized(listened) { listened.take(n) }
 
-    /** Pull-to-refresh: fresh suggestions go on top, what was there stays below. */
-    fun refreshForYou(fresh: List<Video>) {
+    /**
+     * A new page (a new visit, or a pull): the fresh picks take the whole top. What was on top
+     * last time has been seen, so it goes; older picks further down stay below for scrolling.
+     */
+    fun freshForYou(fresh: List<Video>) {
         val played = synchronized(listened) { listened.toHashSet() }
-        _forYou.update { old -> (fresh + old).distinctBy { it.id }.filterNot { it.id in played }.take(MAX_FEED) }
+        _forYou.update { old ->
+            val top = fresh.filterNot { it.id in played }.distinctBy { it.id }
+            if (top.isEmpty()) return@update old // nothing new came: keep what's there
+            val have = top.mapTo(HashSet()) { it.id }
+            val seen = old.take(40).mapTo(HashSet()) { it.id }
+            (top + old.filter { it.id !in have && it.id !in seen && it.id !in played }).take(MAX_FEED)
+        }
     }
 
     /** Infinite scroll: adds to the bottom; returns how many were actually new. */

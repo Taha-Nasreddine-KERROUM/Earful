@@ -19,6 +19,9 @@ import okio.Path.Companion.toOkioPath
 class EarfulApp : Application(), SingletonImageLoader.Factory {
     override fun onCreate() {
         super.onCreate()
+        // A playing notification left behind by a previous run that Android ended while paused:
+        // nothing is behind it any more, so it goes (a live one is put back by the player itself).
+        runCatching { androidx.core.app.NotificationManagerCompat.from(this).cancel(app.earful.playback.PlaybackService.NOTIFICATION_ID) }
         YouTube.init()
         Library.init(this)
         VideoShapes.init(this)

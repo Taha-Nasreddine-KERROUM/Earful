@@ -235,7 +235,9 @@ class PlayerConnection(private val context: Context) {
         _state.value = null
         _queue.value = QueueState()
         PlaybackEvents.clearError()
-        controller?.run { stop(); clearMediaItems() }
+        // (not connected this very moment, after coming back to the app: done as soon as it is,
+        // so the player and its notification never stay behind with a video you closed)
+        withController { c -> c.pause(); c.clearMediaItems() }
         AudioCache.releaseAll()
     }
 

@@ -190,7 +190,10 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     LaunchedEffect(notice) { notice?.let { n -> toast = Toast(n.text, n.action, onAction = n.onAction) } }
 
     var playing by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    // When a video was last picked from a list (its page rising is not "typing interrupted").
+    val pickedAt = remember { longArrayOf(0L) }
     fun play(v: Video) {
+        pickedAt[0] = System.currentTimeMillis()
         keyboard?.hide()
         // A different video while the mini player is showing: it sinks away under the tab bar
         // first (still showing what was playing), then the new one's page rises.
@@ -280,8 +283,6 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
     val imeUp = WindowInsets.isImeVisible
     val imeUpNow by androidx.compose.runtime.rememberUpdatedState(imeUp)
-    var imeDownAt by remember { mutableStateOf(0L) }
-    LaunchedEffect(imeUp) { if (!imeUp) imeDownAt = System.currentTimeMillis() }
     var resumeTyping by remember { mutableStateOf(false) }
     var refocus by remember { mutableIntStateOf(0) }
     val rootView = LocalView.current
@@ -297,8 +298,12 @@ fun AppRoot(conn: PlayerConnection, signals: AppSignals) {
     LaunchedEffect(playerUp) {
         if (playerUp) {
             if (searchOpen) {
-                // (a video tapped in the list puts the keyboard away a moment before the player rises)
-                resumeTyping = resumeTyping || imeUpNow || System.currentTimeMillis() - imeDownAt < 700
+                // Typing and the mini player was opened: typing carries on when it goes back down.
+                // A result picked from the list is different: you've finished typing, so the
+                // keyboard stays away (it used to pop back up as you minimised, pushing the mini
+                // player up with it in the middle of its drop).
+                val picked = System.currentTimeMillis() - pickedAt[0] < 2_000
+                resumeTyping = !picked && (resumeTyping || imeUpNow)
                 dropKeyboard()
                 // once more as the player settles, in case anything brought it back meanwhile
                 delay(350); dropKeyboard()

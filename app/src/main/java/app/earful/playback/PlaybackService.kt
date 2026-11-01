@@ -108,7 +108,7 @@ class PlaybackService : MediaSessionService() {
             )
             .build()
 
-        val player = NoReplayPlayer(exo)
+        val player = NoReplayPlayer(exo) { notificationHidden = true }
         exoRef = exo
 
         // The queue is the player's playlist. Whenever the current or next track changes we
@@ -120,9 +120,15 @@ class PlaybackService : MediaSessionService() {
                 notePassed()
                 updateWindow(); recordListen(); saveSession()
             }
-            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = safely { queueChanged = true; notePassed(); updateWindow(); saveSession() }
+            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) = safely {
+                queueChanged = true; notePassed(); updateWindow(); saveSession()
+            }
+            override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) = safely {
+                if (playWhenReady) notificationHidden = false
+            }
             override fun onPlayerError(error: androidx.media3.common.PlaybackException) = safely { recover() }
             override fun onIsPlayingChanged(isPlaying: Boolean) = safely {
+                if (isPlaying) notificationHidden = false
                 saveSession()
                 // While playing, note the position every ten seconds (a tiny file write), so even if
                 // Android kills the app you come back within seconds of where you were. Paused:
@@ -289,8 +295,37 @@ class PlaybackService : MediaSessionService() {
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo) = session
 
+    // ---- the notification ------------------------------------------------------------------------
+    // Playing: always there (and the app is kept alive by it, however hard the phone cleans up).
+    // Paused: you can swipe it away, and it stays away until something plays again.
+    // Video closed, or paused and the app swiped away: gone.
+
+    /** Swiped away while paused: not shown again until something plays. */
+    private var notificationHidden = false
+
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        val p = session.player
+        if (notificationHidden && !p.playWhenReady && p.mediaItemCount > 0) return
+        super.onUpdateNotification(session, startInForegroundRequired)
+    }
+
+    /** Takes down the notification as the service goes (never left behind on its own). */
+    private fun hideNotification() {
+        runCatching { androidx.core.app.NotificationManagerCompat.from(this).cancel(NOTIFICATION_ID) }
+    }
+
+    /** The app swiped away from recent apps: playing keeps playing; paused (or nothing) goes. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        val p = exoRef
+        if (p != null && p.playWhenReady && p.mediaItemCount > 0 && p.playbackState != Player.STATE_ENDED) return
+        safely { saveSession() }
+        hideNotification()
+        pauseAllPlayersAndStopSelf()
+    }
+
     override fun onDestroy() {
         safely { saveSession() }
+        hideNotification()
         scope.cancel()
         session?.run { player.release(); release() }
         session = null
@@ -522,6 +557,9 @@ class PlaybackService : MediaSessionService() {
         /** How long a video you've moved past keeps its downloaded audio. */
         const val PASSED_STAYS_MS = 60_000L
 
+        /** The playing notification's id (the library's standard one). */
+        const val NOTIFICATION_ID = androidx.media3.session.DefaultMediaNotificationProvider.DEFAULT_NOTIFICATION_ID
+
         fun metadataFor(v: Video): MediaMetadata = MediaMetadata.Builder()
             .setTitle(v.title)
             .setArtist(v.channel)
@@ -551,7 +589,17 @@ class PlaybackService : MediaSessionService() {
  * but seeking (double-tap back, dragging the bar) still works and resumes from there.
  */
 @UnstableApi
-private class NoReplayPlayer(player: Player) : ForwardingPlayer(player) {
+private class NoReplayPlayer(player: Player, private val onHide: () -> Unit) : ForwardingPlayer(player) {
+    /**
+     * "Stop" only ever comes from outside the app: the notification swiped away (or a stop key).
+     * Stopping would leave a player that can't simply play again (so the notification never came
+     * back either). It pauses instead, and the notification stays away until something plays.
+     */
+    override fun stop() {
+        pause()
+        onHide()
+    }
+
     override fun seekToDefaultPosition() {
         if (playbackState != Player.STATE_ENDED) super.seekToDefaultPosition()
     }

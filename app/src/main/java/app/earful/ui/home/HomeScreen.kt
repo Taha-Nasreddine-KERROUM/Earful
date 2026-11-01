@@ -1,5 +1,8 @@
 package app.earful.ui.home
 
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.foundation.background
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animate
@@ -112,8 +115,8 @@ fun HomeScreen(
     var barOffset by remember { mutableFloatStateOf(0f) }
 
     // ----- pull to refresh (iOS style: the list follows your finger with rising resistance) ---
-    val trigger = with(density) { 76.dp.toPx() }
-    val hold = with(density) { 58.dp.toPx() }
+    val trigger = with(density) { 56.dp.toPx() }
+    val hold = with(density) { 50.dp.toPx() }
     val maxPull = with(density) { 150.dp.toPx() }
     var pull by remember { mutableFloatStateOf(0f) }
     var armed by remember { mutableStateOf(false) }
@@ -127,13 +130,13 @@ fun HomeScreen(
     val nested = remember(model) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                // Scrolling back up while pulled: shrink the pull first.
+                // Scrolling back up while pulled: shrink the pull first (as heavily as it grew, so
+                // the finger going back to where it started brings the list back too).
                 if (available.y < 0 && pull > 0f && source == NestedScrollSource.UserInput) {
-                    val next = (pull + available.y).coerceAtLeast(0f)
-                    val used = next - pull
-                    pull = next
+                    val resistance = 0.7f * (1f - pull / maxPull).coerceIn(0.1f, 1f)
+                    pull = (pull + available.y * resistance).coerceAtLeast(0f)
                     if (armed && pull < trigger) armed = false
-                    return Offset(0f, used)
+                    return Offset(0f, available.y)
                 }
                 if (pull == 0f) barOffset = (barOffset + available.y).coerceIn(-barHeightPx, 0f)
                 return Offset.Zero
@@ -141,7 +144,7 @@ fun HomeScreen(
 
             override fun onPostScroll(consumed: Offset, available: Offset, source: NestedScrollSource): Offset {
                 if (available.y > 0f && source == NestedScrollSource.UserInput && !model.refreshing) {
-                    val resistance = 0.55f * (1f - pull / maxPull).coerceIn(0.1f, 1f)
+                    val resistance = 0.7f * (1f - pull / maxPull).coerceIn(0.1f, 1f)
                     pull = (pull + available.y * resistance).coerceAtMost(maxPull)
                     if (!armed && pull >= trigger) { armed = true; Haptics.threshold(view) }
                     return Offset(0f, available.y)
@@ -160,6 +163,13 @@ fun HomeScreen(
     }
     // Spinner retracts as soon as the refresh is done.
     LaunchedEffect(model.refreshing) { if (!model.refreshing && pull > 0f) settle(0f) }
+    // A fresh page has landed (a new visit or a pull): start from its top.
+    LaunchedEffect(model.landed) { if (model.landed > 0) { barOffset = 0f; listState.scrollToItem(0) } }
+    // Back in the app after a while: that's a new visit, with a new page.
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    LaunchedEffect(lifecycle) {
+        lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) { model.visit() }
+    }
 
     suspend fun scrollToTop() {
         barOffset = 0f
@@ -186,10 +196,16 @@ fun HomeScreen(
         LazyColumn(
             state = listState,
             contentPadding = PaddingValues(top = barHeight, bottom = bottomPadding + 16.dp),
-            modifier = Modifier.fillMaxSize().graphicsLayer { translationY = pull },
+            // The pull moves the list only where it's drawn. Moving the list itself would move it
+            // under the finger, which then seemed to travel only a third as far: the pull hardly
+            // ever got far enough to refresh.
+            modifier = Modifier.fillMaxSize().drawWithContent { translate(top = pull) { this@drawWithContent.drawContent() } },
         ) {
             item(key = "update", contentType = "update") { app.earful.ui.components.UpdateCard() }
-            if (forYou.isEmpty()) {
+            if (model.arriving) {
+                // a new visit: the new page is a moment away (last visit's isn't shown meanwhile)
+                items(4, contentType = { "skeleton" }) { VideoCardSkeleton() }
+            } else if (forYou.isEmpty()) {
                 item { EmptyForYou(onOpenSearch) }
             } else {
                 items(forYou, key = { it.id }, contentType = { "card" }) { v ->
@@ -199,6 +215,9 @@ fun HomeScreen(
                 if (model.loadingMore) item(key = "more", contentType = "skeleton") { VideoCardSkeleton() }
             }
         }
+
+        // While it refreshes, the list is drawn lower than it really is: taps wait until it's back.
+        if (model.refreshing) Box(Modifier.fillMaxSize().blockTouches())
 
         // ----- refresh spinner, revealed in the gap the pull opens -------------------------------
         // (the pull is followed in layout and drawing only: the screen isn't rebuilt every frame)
