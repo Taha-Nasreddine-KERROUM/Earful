@@ -74,6 +74,10 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.drawscope.clipPath
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.unit.sp
 import app.earful.playback.QueueEntry
 import app.earful.playback.QueueState
 import app.earful.ui.components.EdgeTide
@@ -243,6 +247,10 @@ fun QueuePanel(
     var dragKey by remember { mutableStateOf<Long?>(null) }
     val dragY = remember { mutableFloatStateOf(0f) }
     val lift = remember { Animatable(0f) }
+    // How moving a video looks this time Up next is open (the next style each time it opens).
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val look = remember { ReorderLook(ReorderStyles.next(ctx)) }
+    val measurer = androidx.compose.ui.text.rememberTextMeasurer()
     val entries = working ?: queue.entries
     // (the long-press handlers live as long as their row: they must always see today's queue,
     // never the one from when the row first appeared)
@@ -272,6 +280,10 @@ fun QueuePanel(
     fun liftRow(e: QueueEntry) {
         if (dragKey != null) return
         working = queueNow.entries
+        look.origin = queueNow.entries.indexOfFirst { it.uid == e.uid }
+        look.settled = null
+        look.undo = null
+        scope.launch { look.flourish.snapTo(0f) }
         dragKey = e.uid
         dragY.floatValue = 0f
         rows.reordering = true
@@ -284,6 +296,22 @@ fun QueuePanel(
         val e = queueNow.entries.firstOrNull { it.uid == key }
         val to = w?.indexOfFirst { it.uid == key } ?: -1
         if (e != null && to >= 0 && to != e.index) moveNow(e.index, to)
+        // each style's last flourish as it's set down
+        look.settled = key
+        scope.launch {
+            when (look.style) {
+                ReorderStyle.Select -> { look.flourish.snapTo(1f); look.flourish.animateTo(0f, androidx.compose.animation.core.tween(600)) }
+                ReorderStyle.Slab -> { delay(260); look.flourish.snapTo(0f); look.flourish.animateTo(1f, androidx.compose.animation.core.tween(700, easing = androidx.compose.animation.core.LinearEasing)) }
+                else -> delay(500)
+            }
+            if (look.settled == key) look.settled = null
+        }
+        if (look.style == ReorderStyle.Group && e != null && to >= 0 && to != e.index) {
+            val first = (w ?: emptyList()).indexOfFirst { !it.passed && !it.current }.coerceAtLeast(0)
+            val place = to - first
+            look.undoText = when (place) { 0 -> "Moved to play next"; 1 -> "Moved to 2nd in line"; 2 -> "Moved to 3rd in line"; else -> "Moved to ${place + 1}th in line" }
+            look.undo = to to e.index
+        }
         scope.launch {
             launch { lift.animateTo(0f, androidx.compose.animation.core.spring(dampingRatio = 0.8f, stiffness = 400f)) }
             androidx.compose.animation.core.animate(dragY.floatValue, 0f, animationSpec = androidx.compose.animation.core.spring(dampingRatio = 0.8f, stiffness = 400f)) { v, _ -> dragY.floatValue = v }
@@ -369,6 +397,202 @@ fun QueuePanel(
             }
         }
 
+        val accent = Color(0xFFFF6482)
+        /** Group: a row's tonal background, its corners opening and closing with the group. */
+        fun androidx.compose.ui.graphics.drawscope.DrawScope.groupBg(uid: Long, color: Color, a: Float) {
+            if (a <= 0.001f) return
+            val c = look.corners[uid]
+            val t = (c?.first?.value ?: 6f).dp.toPx(); val b = (c?.second?.value ?: 6f).dp.toPx()
+            val rr = androidx.compose.ui.geometry.RoundRect(8.dp.toPx(), 1.dp.toPx(), size.width - 8.dp.toPx(), size.height - 1.dp.toPx(),
+                androidx.compose.ui.geometry.CornerRadius(t), androidx.compose.ui.geometry.CornerRadius(t),
+                androidx.compose.ui.geometry.CornerRadius(b), androidx.compose.ui.geometry.CornerRadius(b))
+            drawPath(androidx.compose.ui.graphics.Path().apply { addRoundRect(rr) }, color.copy(alpha = a * color.alpha))
+        }
+        /** Slab: the band of light that crosses it as it lands. */
+        fun androidx.compose.ui.graphics.drawscope.DrawScope.slabShine(uid: Long, out: Float) {
+            if (look.settled != uid) return
+            val p = look.flourish.value
+            if (p <= 0f || p >= 1f) return
+            val span = size.width + 2 * out
+            val bx = -out + span * (p * 1.3f - 0.15f)
+            val band = 70.dp.toPx()
+            drawRect(
+                androidx.compose.ui.graphics.Brush.horizontalGradient(
+                    listOf(Color.Transparent, Color.White.copy(alpha = 0.32f * kotlin.math.sin(p * Math.PI.toFloat())), Color.Transparent),
+                    startX = bx - band, endX = bx + band,
+                ),
+                topLeft = androidx.compose.ui.geometry.Offset(-out, 0f), size = androidx.compose.ui.geometry.Size(span, size.height),
+            )
+        }
+        /** The video you hold, in this time's style. */
+        fun heldLook(e: QueueEntry): Modifier = when (look.style) {
+            ReorderStyle.Select -> Modifier.graphicsLayer {
+                // moved like a layer on a canvas: it stays its size
+                translationY = dragY.floatValue
+            }.drawBehind {
+                val l = lift.value.coerceIn(0f, 1f)
+                drawRect(Color(0xFF161618).copy(alpha = l)) // (nothing shows through from underneath)
+                drawRect(Color(0xFF0D99FF).copy(alpha = 0.10f * l))
+            }
+            ReorderStyle.Slab -> Modifier.graphicsLayer {
+                // a slab of glass: the full width, square-ish corners, tipping with your speed
+                val l = lift.value
+                val lc = l.coerceIn(0f, 1f)
+                translationY = dragY.floatValue
+                scaleX = 1f + 0.03f * l; scaleY = scaleX
+                rotationX = look.tilt
+                cameraDistance = 10f * unit
+                shadowElevation = 18.dp.toPx() * lc
+                shape = WideShape(8.dp.toPx() * lc, (14f - 9f * lc).dp.toPx())
+            }.drawWithContent {
+                val l = lift.value.coerceIn(0f, 1f)
+                val out = 8.dp.toPx() * l
+                val r = androidx.compose.ui.geometry.CornerRadius((14f - 9f * l).dp.toPx())
+                val o = androidx.compose.ui.geometry.Offset(-out, 0f)
+                val sz = androidx.compose.ui.geometry.Size(size.width + 2 * out, size.height)
+                drawRoundRect(Color(0xFF242428).copy(alpha = 0.92f * l), o, sz, r)
+                drawContent()
+                drawRoundRect(androidx.compose.ui.graphics.Brush.linearGradient(
+                    listOf(Color.White.copy(alpha = 0.13f * l), Color.Transparent, Color.White.copy(alpha = 0.05f * l)),
+                    start = o, end = androidx.compose.ui.geometry.Offset(size.width + out, size.height)), o, sz, r)
+                drawLine(Color.White.copy(alpha = 0.5f * l), androidx.compose.ui.geometry.Offset(-out + r.x, 0.5.dp.toPx()), androidx.compose.ui.geometry.Offset(size.width + out - r.x, 0.5.dp.toPx()), 1.dp.toPx())
+                drawRect(Color.White.copy(alpha = 0.07f * l), androidx.compose.ui.geometry.Offset(-out + r.x, size.height - 3.dp.toPx()), androidx.compose.ui.geometry.Size(sz.width - 2 * r.x, 3.dp.toPx()))
+                slabShine(e.uid, out)
+            }
+            ReorderStyle.Group -> Modifier.graphicsLayer {
+                // broken out of the group as a pill
+                val l = lift.value
+                translationY = dragY.floatValue
+                scaleX = 1f + 0.03f * l; scaleY = scaleX
+                shadowElevation = 8.dp.toPx() * l.coerceIn(0f, 1f)
+                shape = WideShape(-8.dp.toPx(), 32.dp.toPx())
+            }.drawBehind { groupBg(e.uid, Color(0xFF5E2738), lift.value.coerceIn(0f, 1f)) }
+            ReorderStyle.Timeline -> Modifier.graphicsLayer {
+                // a clip on the timeline, with trim handles
+                translationY = dragY.floatValue
+                shadowElevation = 10.dp.toPx() * lift.value.coerceIn(0f, 1f)
+                shape = RoundedCornerShape(6.dp)
+            }.drawWithContent {
+                val l = lift.value.coerceIn(0f, 1f)
+                val r = androidx.compose.ui.geometry.CornerRadius(6.dp.toPx())
+                drawRoundRect(Color(0xFF2A2A2F).copy(alpha = l), cornerRadius = r)
+                drawRoundRect(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(accent.copy(alpha = 0.26f * l), Color(0xFF8E6CFF).copy(alpha = 0.22f * l))), cornerRadius = r)
+                drawContent()
+                drawRoundRect(accent.copy(alpha = l), cornerRadius = r, style = androidx.compose.ui.graphics.drawscope.Stroke(1.5.dp.toPx()))
+                drawRect(Color.White.copy(alpha = 0.9f * l), size = androidx.compose.ui.geometry.Size(4.dp.toPx(), size.height))
+                drawRect(Color.White.copy(alpha = 0.9f * l), topLeft = androidx.compose.ui.geometry.Offset(size.width - 4.dp.toPx(), 0f), size = androidx.compose.ui.geometry.Size(4.dp.toPx(), size.height))
+            }
+        }
+        /** The others, in this time's style. */
+        fun restLook(e: QueueEntry): Modifier = when (look.style) {
+            ReorderStyle.Slab -> Modifier.graphicsLayer {
+                // magnified a little as the glass passes over
+                val k = dragKey ?: return@graphicsLayer
+                val info = list.layoutInfo.visibleItemsInfo
+                val me = info.firstOrNull { it.key == k } ?: return@graphicsLayer
+                val mine = info.firstOrNull { it.key == e.uid } ?: return@graphicsLayer
+                val l = lift.value.coerceIn(0f, 1f)
+                val d = kotlin.math.abs(mine.offset - (me.offset + dragY.floatValue))
+                val m = (1f - d / 52.dp.toPx()).coerceIn(0f, 1f) * l
+                scaleX = 1f + 0.08f * m; scaleY = scaleX
+                alpha = 1f - 0.2f * l + 0.2f * m
+            }.drawWithContent { drawContent(); slabShine(e.uid, 0f) }
+            ReorderStyle.Group -> if (e.passed || e.current) Modifier else Modifier.drawBehind { groupBg(e.uid, Color(0xFF2E292D), lift.value.coerceIn(0f, 1f)) }
+            else -> Modifier
+        }
+
+        // Slab leans with your finger's speed; Group's scalloped picture turns slowly.
+        LaunchedEffect(dragKey, look.style) {
+            if (look.style != ReorderStyle.Slab && look.style != ReorderStyle.Group) return@LaunchedEffect
+            var last = 0L
+            var prevY = dragY.floatValue
+            var speed = 0f
+            while (dragKey != null || kotlin.math.abs(look.tilt) > 0.05f) {
+                withFrameNanos { now ->
+                    val dt = if (last == 0L) 0.016f else ((now - last) / 1e9f).coerceIn(0.001f, 0.05f)
+                    last = now
+                    val y = dragY.floatValue
+                    val v = if (dragKey != null) (y - prevY) / dt / unit else 0f // dp/s
+                    prevY = y
+                    speed += (v - speed) * (1f - kotlin.math.exp(-dt * 18f))
+                    val want = if (dragKey != null) (-speed / 190f).coerceIn(-6f, 6f) else 0f
+                    look.tilt += (want - look.tilt) * (1f - kotlin.math.exp(-dt * 12f))
+                    look.spin += dt * 0.9f
+                }
+            }
+            look.tilt = 0f
+        }
+        // Group: the group opens where the video will land and closes around it again.
+        LaunchedEffect(entries, dragKey, look.style) {
+            if (look.style != ReorderStyle.Group) return@LaunchedEffect
+            val first = entries.indexOfFirst { !it.passed && !it.current }
+            entries.forEachIndexed { i, en ->
+                if (first < 0 || i < first) return@forEachIndexed
+                val held = en.uid == dragKey
+                val top = when { held -> 32f; i == first || entries.getOrNull(i - 1)?.uid == dragKey -> 24f; else -> 6f }
+                val bottom = when { held -> 32f; i == entries.lastIndex || entries.getOrNull(i + 1)?.uid == dragKey -> 24f; else -> 6f }
+                val c = look.corner(en.uid, if (held) 32f else 6f)
+                launch { c.first.animateTo(top, androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 520f)) }
+                launch { c.second.animateTo(bottom, androidx.compose.animation.core.spring(dampingRatio = 0.55f, stiffness = 520f)) }
+            }
+        }
+        // Group: the bar saying where it went stays a few seconds.
+        LaunchedEffect(look.undo) {
+            if (look.undo == null) { look.undoShown.animateTo(0f, androidx.compose.animation.core.tween(200)); return@LaunchedEffect }
+            look.undoShown.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = 0.8f, stiffness = 500f))
+            delay(4000)
+            look.undo = null
+        }
+        // Timeline: the start times recount as things move.
+        LaunchedEffect(entries, look.style) {
+            if (look.style != ReorderStyle.Timeline) return@LaunchedEffect
+            val first = entries.indexOfFirst { !it.passed && !it.current }
+            if (first < 0) return@LaunchedEffect
+            val cur = entries.firstOrNull { it.current }
+            var t = ((cur?.video?.durationSec ?: 0L) - soundPosition() / 1_000_000L).coerceAtLeast(0L).toFloat()
+            for (i in first until entries.size) {
+                val a = look.times.getOrPut(i) { Animatable(t) }
+                val to = t
+                launch { a.animateTo(to, androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 160f)) }
+                t += entries[i].video.durationSec
+            }
+        }
+        // Select: the red guide glides from place to place.
+        LaunchedEffect(look.style) {
+            if (look.style != ReorderStyle.Select) return@LaunchedEffect
+            androidx.compose.runtime.snapshotFlow {
+                val k = dragKey ?: look.settled
+                list.layoutInfo.visibleItemsInfo.firstOrNull { it.key == k }?.offset?.toFloat()
+            }.collect { to ->
+                if (to == null) return@collect
+                if (look.guideY.value == 0f) look.guideY.snapTo(to)
+                else launch { look.guideY.animateTo(to, androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 1400f)) }
+            }
+        }
+
+        Box(
+            Modifier.fillMaxSize().then(
+                // Group: ink spreads from where your finger touches (watching only, never taking the touch)
+                if (look.style != ReorderStyle.Group) Modifier else Modifier.pointerInput(Unit) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val ev = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                            val ch = ev.changes.firstOrNull() ?: continue
+                            if (ch.pressed && !ch.previousPressed) {
+                                val p = ch.position
+                                val row = list.layoutInfo.visibleItemsInfo.firstOrNull { p.y >= it.offset && p.y < it.offset + it.size }
+                                if (row != null && entries.getOrNull(row.index)?.let { !it.passed && !it.current } == true) {
+                                    look.ink = Ink(p.x, p.y - row.offset, row.key)
+                                    scope.launch { look.inkFade.snapTo(0f); look.inkGrow.snapTo(0f); look.inkGrow.animateTo(1f, androidx.compose.animation.core.tween(520, easing = androidx.compose.animation.core.LinearOutSlowInEasing)) }
+                                }
+                            } else if (!ch.pressed && ch.previousPressed && look.ink != null) {
+                                scope.launch { look.inkFade.animateTo(1f, androidx.compose.animation.core.tween(320)); look.ink = null }
+                            }
+                        }
+                    }
+                }
+            )
+        ) {
         LazyColumn(
             state = list,
             modifier = Modifier.fillMaxSize().nestedScroll(nested),
@@ -390,18 +614,162 @@ fun QueuePanel(
                     order = { i - list.firstVisibleItemIndex },
                     onTap = { if (!e.current) onJump(e.index) },
                     onRemove = { onRemove(e.index) },
-                    modifier = (if (held) Modifier.zIndex(1f).graphicsLayer {
-                        // lifted off the list: a little bigger, with a shadow, on its own card
-                        val l = lift.value
-                        translationY = dragY.floatValue
-                        scaleX = 1f + 0.035f * l; scaleY = scaleX
-                        shadowElevation = 16.dp.toPx() * l
-                        shape = RoundedCornerShape(12.dp)
-                    }.drawBehind {
-                        drawRoundRect(Color(0xFF2E2E31).copy(alpha = lift.value.coerceIn(0f, 1f)), cornerRadius = androidx.compose.ui.geometry.CornerRadius(12.dp.toPx()))
-                    } else Modifier.animateItem()).eatable(),
+                    thumbMorph = { if (held && look.style == ReorderStyle.Group) lift.value.coerceIn(0f, 1f) else 0f },
+                    thumbTurn = { look.spin },
+                    modifier = (if (held) Modifier.zIndex(1f).then(heldLook(e)) else Modifier.animateItem().then(restLook(e)))
+                        .then(if (look.style == ReorderStyle.Timeline) Modifier.layout { m, c ->
+                            // Timeline: the rows make room for the ruler on the left
+                            val shift = (58.dp.toPx() * lift.value.coerceIn(0f, 1f)).roundToInt()
+                            val w = (c.maxWidth - shift).coerceAtLeast(0)
+                            val p = m.measure(c.copy(minWidth = w, maxWidth = w))
+                            layout(c.maxWidth, p.height) { p.place(shift, 0) }
+                        } else Modifier)
+                        .eatable(),
                 )
             }
+        }
+        androidx.compose.foundation.Canvas(Modifier.matchParentSize()) {
+            val u = unit
+            val info = list.layoutInfo.visibleItemsInfo
+            val l = lift.value.coerceIn(0f, 1.2f)
+            val all = l.coerceIn(0f, 1f)
+            val w = working ?: queue.entries
+            val first = w.indexOfFirst { !it.passed && !it.current }
+            fun label(text: String, x: Float, y: Float, bg: Color, a: Float, align: Int = 0) {
+                val t = measurer.measure(text, androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
+                val pw = t.size.width + 12f * u; val ph = 18f * u
+                val lx = when (align) { 1 -> x - pw / 2; 2 -> x - pw; else -> x }
+                drawRoundRect(bg.copy(alpha = a), androidx.compose.ui.geometry.Offset(lx, y), androidx.compose.ui.geometry.Size(pw, ph), androidx.compose.ui.geometry.CornerRadius(3.5f * u))
+                drawText(t, topLeft = androidx.compose.ui.geometry.Offset(lx + 6f * u, y + (ph - t.size.height) / 2), alpha = a)
+            }
+            when (look.style) {
+                ReorderStyle.Select -> {
+                    val key = dragKey ?: look.settled ?: return@Canvas
+                    val fl = look.flourish.value
+                    val a = maxOf(all, fl)
+                    if (a <= 0.001f) return@Canvas
+                    val me = info.firstOrNull { it.key == key } ?: return@Canvas
+                    val blue = Color(0xFF0D99FF)
+                    val red = Color(0xFFF24822)
+                    val x0 = 6f * u; val x1 = size.width - 6f * u
+                    val top = me.offset + dragY.floatValue
+                    val h = me.size.toFloat()
+                    val slot = w.indexOfFirst { it.uid == key }
+                    // an orange line from the middle of its picture where it started to where it is,
+                    // counting the places it has moved
+                    val origin = look.origin
+                    if (dragKey != null && origin >= 0 && slot >= 0 && origin != slot) {
+                        val ghost = info.firstOrNull { it.index == origin }
+                        if (ghost != null) {
+                            val ya = ghost.offset + ghost.size / 2f; val yb = top + h / 2f
+                            val rx = 52f * u
+                            val c = red.copy(alpha = all)
+                            drawLine(c, androidx.compose.ui.geometry.Offset(rx, ya), androidx.compose.ui.geometry.Offset(rx, yb), 1f * u)
+                            drawLine(c, androidx.compose.ui.geometry.Offset(rx - 5f * u, ya), androidx.compose.ui.geometry.Offset(rx + 5f * u, ya), 1f * u)
+                            drawLine(c, androidx.compose.ui.geometry.Offset(rx - 5f * u, yb), androidx.compose.ui.geometry.Offset(rx + 5f * u, yb), 1f * u)
+                            val n = origin - slot
+                            label("${if (n > 0) "↑" else "↓"} ${kotlin.math.abs(n)} ${if (kotlin.math.abs(n) == 1) "place" else "places"}", rx + 8f * u, (ya + yb) / 2 - 9f * u, red, all)
+                        }
+                    }
+                    // the red guide where it will go (it flashes as it snaps in)
+                    val gy = look.guideY.value
+                    val th = 2f * u * (1f + 1.5f * fl)
+                    drawRect(red.copy(alpha = a), androidx.compose.ui.geometry.Offset(x0, gy - th / 2), androidx.compose.ui.geometry.Size(x1 - x0, th))
+                    drawCircle(red.copy(alpha = a), 4f * u, androidx.compose.ui.geometry.Offset(x0, gy))
+                    drawCircle(red.copy(alpha = a), 4f * u, androidx.compose.ui.geometry.Offset(x1, gy))
+                    if (first in 0..slot) label("Insert · ${slot - first + 1}", x1 - 14f * u, gy - 9f * u, red, a, align = 2)
+                    // the selection: box, handles and its size
+                    val grow = 1f - (1f - all) * 0.04f
+                    val cx = (x0 + x1) / 2; val cy = top + h / 2
+                    val bw = (x1 - x0) * grow; val bh = h * grow
+                    val bx = cx - bw / 2; val by = cy - bh / 2
+                    if (fl > 0f) drawRect(blue.copy(alpha = 0.25f * fl), androidx.compose.ui.geometry.Offset(bx - 3f * u, by - 3f * u), androidx.compose.ui.geometry.Size(bw + 6f * u, bh + 6f * u), style = androidx.compose.ui.graphics.drawscope.Stroke(4f * u))
+                    drawRect(blue.copy(alpha = a), androidx.compose.ui.geometry.Offset(bx, by), androidx.compose.ui.geometry.Size(bw, bh), style = androidx.compose.ui.graphics.drawscope.Stroke(1.5f * u))
+                    listOf(bx to by, bx + bw to by, bx to by + bh, bx + bw to by + bh).forEachIndexed { n, (hx, hy) ->
+                        val sc = ((l * 1.6f) - n * 0.12f).coerceIn(0f, 1.1f).let { if (dragKey == null) maxOf(it, fl) else it }
+                        val hs = 8f * u * sc
+                        if (hs > 0.5f) {
+                            drawRect(Color.White.copy(alpha = a), androidx.compose.ui.geometry.Offset(hx - hs / 2, hy - hs / 2), androidx.compose.ui.geometry.Size(hs, hs))
+                            drawRect(blue.copy(alpha = a), androidx.compose.ui.geometry.Offset(hx - hs / 2, hy - hs / 2), androidx.compose.ui.geometry.Size(hs, hs), style = androidx.compose.ui.graphics.drawscope.Stroke(1.5f * u))
+                        }
+                    }
+                    label("${((x1 - x0) / u).roundToInt()} × ${(h / u).roundToInt()}", cx, by + bh + 6f * u, blue, a, align = 1)
+                }
+                ReorderStyle.Group -> {
+                    // ink spreading from under your finger, inside the row's own shape
+                    val ink = look.ink ?: return@Canvas
+                    val row = info.firstOrNull { it.key == ink.key } ?: return@Canvas
+                    val a = 0.16f * (1f - look.inkFade.value)
+                    if (a <= 0.001f) return@Canvas
+                    val c = (row.key as? Long)?.let { look.corners[it] }
+                    val held = row.key == dragKey
+                    val t = (c?.first?.value ?: 6f) * u; val b = (c?.second?.value ?: 6f) * u
+                    val y0 = row.offset + (if (held) dragY.floatValue else 0f)
+                    val rr = androidx.compose.ui.geometry.RoundRect(8f * u, y0 + 1f * u, size.width - 8f * u, y0 + row.size - 1f * u,
+                        androidx.compose.ui.geometry.CornerRadius(t), androidx.compose.ui.geometry.CornerRadius(t),
+                        androidx.compose.ui.geometry.CornerRadius(b), androidx.compose.ui.geometry.CornerRadius(b))
+                    clipPath(androidx.compose.ui.graphics.Path().apply { addRoundRect(rr) }) {
+                        drawCircle(Color(0xFFFFDAD3).copy(alpha = a), size.width * 1.1f * look.inkGrow.value, androidx.compose.ui.geometry.Offset(ink.x, y0 + ink.y))
+                    }
+                }
+                ReorderStyle.Timeline -> {
+                    if (all <= 0.001f || first < 0) return@Canvas
+                    val shift = 58f * u * all
+                    val trackX = 48f * u
+                    val cur = info.firstOrNull { w.getOrNull(it.index)?.current == true }
+                    val slots = info.filter { it.index >= first }
+                    if (slots.isNotEmpty()) {
+                        val yA = cur?.let { it.offset + it.size / 2f } ?: slots.first().offset.toFloat()
+                        val yB = slots.last().offset.toFloat()
+                        drawLine(Color.White.copy(alpha = 0.14f * all), androidx.compose.ui.geometry.Offset(trackX, yA), androidx.compose.ui.geometry.Offset(trackX, yB), 2f * u)
+                    }
+                    if (cur != null) label("NOW", 4f * u - (1f - all) * 40f * u, cur.offset + cur.size / 2f - 9f * u, Color(0xFFFF3B30), all)
+                    val longest = w.filter { !it.passed && !it.current }.maxOfOrNull { it.video.durationSec }?.coerceAtLeast(1L) ?: 1L
+                    for (it in slots) {
+                        val y = it.offset.toFloat()
+                        drawCircle(Color(0xFF1E1E22), 5f * u, androidx.compose.ui.geometry.Offset(trackX, y))
+                        drawCircle(Color.White.copy(alpha = 0.4f * all), 5f * u, androidx.compose.ui.geometry.Offset(trackX, y), style = androidx.compose.ui.graphics.drawscope.Stroke(2f * u))
+                        val sec = look.times[it.index]?.value ?: 0f
+                        val t = measurer.measure(shortTime(sec), androidx.compose.ui.text.TextStyle(color = Color.White.copy(alpha = 0.7f * all), fontSize = 10.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold))
+                        drawText(t, topLeft = androidx.compose.ui.geometry.Offset(41f * u - t.size.width - (1f - all) * 30f * u, y + 8f * u))
+                        // its length, as a bar under its title
+                        val en = w.getOrNull(it.index) ?: continue
+                        val held = it.key == dragKey
+                        val by = y + (if (held) dragY.floatValue else 0f) + it.size - 9f * u
+                        val bx = shift + 100f * u
+                        val full = (size.width - bx - 40f * u).coerceAtLeast(0f)
+                        val bw = (full * en.video.durationSec / longest.toFloat()).coerceAtLeast(8f * u)
+                        drawRoundRect(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(accent.copy(alpha = all), Color(0xFF8E6CFF).copy(alpha = all)), startX = bx, endX = bx + bw),
+                            androidx.compose.ui.geometry.Offset(bx, by), androidx.compose.ui.geometry.Size(bw, 3f * u * all), androidx.compose.ui.geometry.CornerRadius(1.5f * u))
+                    }
+                }
+                ReorderStyle.Slab -> Unit
+            }
+        }
+        // Group: where it went, with Undo
+        if (look.style == ReorderStyle.Group && (look.undo != null || look.undoShown.value > 0.001f)) {
+            Row(
+                Modifier.align(Alignment.BottomCenter)
+                    .padding(start = 12.dp, end = 12.dp, bottom = navBottom + 12.dp)
+                    .fillMaxWidth().height(48.dp)
+                    .graphicsLayer { val v = look.undoShown.value; translationY = (1f - v) * 64.dp.toPx(); alpha = v.coerceIn(0f, 1f) }
+                    .background(Color(0xFFF1DFDB), RoundedCornerShape(4.dp))
+                    .padding(start = 16.dp, end = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(look.undoText, Type.subheadStrong, color = Color(0xFF3B2B28), maxLines = 1, modifier = Modifier.weight(1f))
+                Box(
+                    Modifier.height(40.dp).clip(RoundedCornerShape(20.dp))
+                        .clickable(role = androidx.compose.ui.semantics.Role.Button, onClickLabel = "Undo the move") {
+                            val m = look.undo ?: return@clickable
+                            look.undo = null
+                            moveNow(m.first, m.second)
+                        }
+                        .padding(horizontal = 14.dp),
+                    contentAlignment = Alignment.Center,
+                ) { Text("Undo", Type.subheadStrong, color = Color(0xFF904A40)) }
+            }
+        }
         }
     }
 }
@@ -426,6 +794,9 @@ private fun QueueRow(
     onDrag: (Float) -> Unit = {},
     onDrop: () -> Unit = {},
     onPlayPause: () -> Unit = {},
+    /** Group: how far its picture has become a scalloped shape (0..1), and that shape's turn. */
+    thumbMorph: () -> Float = { 0f },
+    thumbTurn: () -> Float = { 0f },
 ) {
     val view = LocalView.current
     // (a long press that lifted the row isn't also a tap when the finger comes up)
@@ -631,7 +1002,11 @@ private fun QueueRow(
                 .padding(horizontal = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Box(Modifier.width(72.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(6.dp)).graphicsLayer { alpha = dimmed }) {
+            Box(Modifier.width(72.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(6.dp)).graphicsLayer {
+                alpha = dimmed
+                val m = thumbMorph()
+                if (m > 0.01f) { shape = CookieShape(m, thumbTurn()); clip = true }
+            }) {
                 RemoteImage(entry.video.thumbnail, Modifier.fillMaxSize(), sizePx = 216)
             }
             Column(Modifier.weight(1f).padding(start = 12.dp, end = 8.dp).graphicsLayer { alpha = dimmed }) {

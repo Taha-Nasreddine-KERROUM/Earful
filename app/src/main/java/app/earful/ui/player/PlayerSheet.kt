@@ -637,6 +637,11 @@ fun PlayerSheet(
         fun Dp.px() = with(density) { toPx() }
         val unit = density.density
 
+        // The drag handler below lives across recompositions (it isn't restarted for these), so it
+        // reads them as they are now: a video first opened in search is still dropped into the
+        // tab bar's water, with its ripple, once you're back on Home.
+        val barShownNow by rememberUpdatedState(tabBarShown)
+        val closedNow by rememberUpdatedState(onClosed)
         var controlsH by remember { mutableFloatStateOf(340.dp.px()) }
         val miniH = MiniHeight.px()
         val margin = MiniMargin.px()
@@ -652,7 +657,7 @@ fun PlayerSheet(
         w.topOf = { q -> (if (sheet.direct) (1f - q) * H else lerp(collapsedTop() - lift(), 0f, q)) + sheet.dismiss.value }
         w.onLand = { push ->
             // The tab bar's surface ripples where the mini player lands on it.
-            if (tabBarShown) water.ripple(W / 2, (2.5f + push / 60f).coerceIn(3f, 7f) * unit, 70f * unit, 11f * unit, 1.1f)
+            if (barShownNow) water.ripple(W / 2, (2.5f + push / 60f).coerceIn(3f, 7f) * unit, 70f * unit, 11f * unit, 1.1f)
         }
         // Everything that changes on every frame of a move (the progress, the water, the pull) is
         // read only while laying out and drawing, never while composing: a moving player costs a
@@ -714,7 +719,7 @@ fun PlayerSheet(
             sheet.dismiss.animateTo(start - 6f * unit + miniH + margin + 20f * unit, tween(if (quick) 380 else 500, easing = Motion.inCubic)) {
                 if (!touched && value > margin + 6f * unit) {
                     touched = true
-                    if (tabBarShown) {
+                    if (barShownNow) {
                         water.ripple(W / 2, (if (quick) 7f else 9f) * unit, 90f * unit, 11f * unit, 1.3f)
                         val side = lerp(margin, 0f, pNow())
                         if (lucky) water.splash(side, W - side, unit)
@@ -722,7 +727,7 @@ fun PlayerSheet(
                 }
             }
         }
-        fun sink() = scope.launch { sinkDown(); onClosed() }
+        fun sink() = scope.launch { sinkDown(); closedNow() }
         sheet.sinkAway = { sinkDown(quick = true) }
 
         Box(
@@ -806,7 +811,7 @@ fun PlayerSheet(
                         }
                     }
                 }
-                .pointerInput(queueRange) {
+                .pointerInput(queueRange, W, H) {
                     awaitEachGesture {
                         val down = awaitFirstDown(requireUnconsumed = false)
                         if (sheet.direct) return@awaitEachGesture // still rising into place
